@@ -50,7 +50,7 @@ If Codex already defines `chrome-devtools` or the old `chrome-debugging-recovery
 
 The install is a **staged installation with rollback on detected failure**. It builds and validates the complete candidate payload, including the pinned dependencies, in a unique same-volume staging directory before it stops the old owned task or daemon. During commit, it moves the old payload to a transaction backup and moves the staged payload into place. If a later step fails, it stops the new owned task or daemon, preserves the failed payload for diagnosis, restores the old payload, state, managed files, and task XML, then restarts an old running task. It is not one atomic Windows transaction. Backups are stored under the owner-only install root.
 
-After installation, restart Codex. Old conversations can use the bridge in a new run. Old runs can keep direct `npx chrome-devtools-mcp` processes alive. Run doctor and close or explicitly stop those legacy MCP processes before you rely on one persistent backend.
+After installation, restart Codex. Old conversations can use the bridge in a new run. Old runs can keep direct `npx chrome-devtools-mcp` processes or a replaced bridge prototype alive. Run doctor and close or explicitly stop those legacy MCP processes before you rely on one persistent backend.
 
 ```powershell
 npm run doctor

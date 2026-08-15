@@ -52,4 +52,4 @@ The uninstaller must retain Chrome, Chrome profiles, other MCP servers, and unre
 
 If an unexpected action occurs, stop the MCP client, preserve the audit log and managed state, and record the selected page and time. Do not repeat an uncertain mutation. Remove the bridge through the uninstaller if containment is needed, then investigate the trusted client and local user account.
 
-If doctor reports `no-legacy-direct-chrome-mcp` as failed, one or more old Codex runs still use a direct `npx chrome-devtools-mcp` process. These processes bypass the persistent daemon and can cause repeated native approval dialogs. Finish the old run or stop only the verified legacy MCP process tree. Do not stop Chrome or the persistent daemon as a first response.
+If doctor reports `no-legacy-direct-chrome-mcp` as failed, one or more old Codex runs still use a direct `npx chrome-devtools-mcp` process or a replaced bridge prototype. These processes bypass the persistent daemon and can cause repeated native approval dialogs. Finish the old run or stop only the verified legacy MCP process tree. Do not stop Chrome or the persistent daemon as a first response.

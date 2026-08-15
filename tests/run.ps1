@@ -161,6 +161,9 @@ try {
         'single-trust-user Windows host', 'pipe server', 'bearer token'
     )) { Require-Text $readme ([regex]::Escape($phrase)) "README security content is missing: $phrase" }
 
+    $doctorText = Get-Content -LiteralPath scripts\doctor.ps1 -Raw
+    Require-Text $doctorText ([regex]::Escape('[\\/]chrome-devtools-bridge[\\/]')) 'Doctor must detect the replaced MCPorter prototype path as a legacy Chrome bridge.'
+
     $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
     $shrinkwrapText = Get-Content -LiteralPath npm-shrinkwrap.json -Raw
     if ($package.os -notcontains 'win32' -or $package.cpu -notcontains 'x64') { throw 'package.json must declare the tested Windows x64 scope.' }

@@ -108,8 +108,14 @@ Add-Check 'no-network-listener-mode' ($networkBridgeProcesses.Count -eq 0) "matc
 
 $allProcesses = @(Get-CimInstance Win32_Process)
 $legacyDirect = @($allProcesses | Where-Object {
-    $_.CommandLine -match '(?i)(?:npx(?:-cli\.js)?.*chrome-devtools-mcp|npm-cache\\_npx.*chrome-devtools-mcp)' -and
-    $_.CommandLine -notmatch [regex]::Escape($InstallRoot)
+    $_.Name -eq 'node.exe' -and
+    $_.CommandLine -and
+    $_.CommandLine -notmatch [regex]::Escape($InstallRoot) -and
+    (
+        $_.CommandLine -match '(?i)(?:npx(?:-cli\.js)?.*chrome-devtools-mcp|npm-cache\\_npx.*chrome-devtools-mcp)' -or
+        $_.CommandLine -match '(?i)[\\/]chrome-devtools-mcp(?:[\\/]|\.js)' -or
+        $_.CommandLine -match '(?i)[\\/]chrome-devtools-bridge[\\/]'
+    )
 })
 Add-Check 'no-legacy-direct-chrome-mcp' ($legacyDirect.Count -eq 0) "matching_processes=$($legacyDirect.Count); pids=$((@($legacyDirect.ProcessId) -join ','))"
 
