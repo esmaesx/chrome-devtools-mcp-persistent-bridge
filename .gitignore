@@ -1,0 +1,12 @@
+node_modules/
+package-lock.json
+work/
+logs/
+backup/
+install-state.json
+mcporter.json
+*.bak
+*.tmp
+*.log
+.DS_Store
+Thumbs.db

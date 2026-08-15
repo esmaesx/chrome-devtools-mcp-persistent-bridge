@@ -1,0 +1,7 @@
+node_modules/
+work/
+logs/
+backups/
+install-state.json
+package-lock.json
+.git/

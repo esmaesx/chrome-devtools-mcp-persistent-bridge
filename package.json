@@ -1,0 +1,38 @@
+{
+  "name": "chrome-devtools-mcp-persistent-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Windows-only persistent Chrome DevTools MCP bridge with fail-closed permission recovery for Codex.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dev-newb/chrome-devtools-mcp-persistent-bridge.git"
+  },
+  "bugs": "https://github.com/dev-newb/chrome-devtools-mcp-persistent-bridge/issues",
+  "homepage": "https://github.com/dev-newb/chrome-devtools-mcp-persistent-bridge#readme",
+  "keywords": [
+    "chrome-devtools",
+    "codex",
+    "mcp",
+    "windows"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "npm@11.9.0",
+  "scripts": {
+    "test": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests/run.ps1",
+    "doctor": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "chrome-devtools-mcp": "1.7.0",
+    "zod": "4.4.3"
+  }
+}
