@@ -67,8 +67,8 @@ async function parsedDaemonStatus(root) {
   return JSON.parse(lines[0]);
 }
 
-async function statusScriptResult(root) {
-  const result = await runPowerShellScript(join(root, 'runtime', 'status.ps1'), [], root);
+async function statusScriptResult(root, env = process.env) {
+  const result = await runPowerShellScript(join(root, 'runtime', 'status.ps1'), [], root, env);
   const lines = result.stdout.trim().split(/\r?\n/);
   expect(lines.length === 1, 'status.ps1 emitted more than one JSON object.');
   expect(result.stderr.trim() === '', 'status.ps1 emitted an unsanitized stderr diagnostic.');
@@ -79,9 +79,9 @@ async function parsedScriptStatus(root) {
   return (await statusScriptResult(root)).value;
 }
 
-function runPowerShellScript(script, args, cwd = repositoryRoot) {
+function runPowerShellScript(script, args, cwd = repositoryRoot, env = process.env) {
   return new Promise((resolveRun, rejectRun) => {
-    execFile(powerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], { cwd, windowsHide: true, timeout: 15_000, encoding: 'utf8' }, (error, stdout, stderr) => {
+    execFile(powerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], { cwd, env, windowsHide: true, timeout: 15_000, encoding: 'utf8' }, (error, stdout, stderr) => {
       if (error && error.killed) return rejectRun(error);
       resolveRun({ exitCode: Number.isSafeInteger(error?.code) ? error.code : 0, stdout, stderr });
     });
@@ -349,7 +349,7 @@ async function normalFlowAndInvalidList() {
     expect(parsedStatus.lease?.state === 'free', 'Daemon status did not report a free lease.');
     const scriptStatusResult = await statusScriptResult(fixture.root);
     const scriptStatus = scriptStatusResult.value;
-    expect(scriptStatusResult.exitCode === 0, `status.ps1 returned ${scriptStatusResult.exitCode} for a healthy daemon.`);
+    expect(scriptStatusResult.exitCode === 0, `status.ps1 returned ${scriptStatusResult.exitCode} for a healthy daemon: ${textOf(scriptStatus)}`);
     expect(scriptStatus.schema_version === 2 && scriptStatus.daemon?.status === 'running' && scriptStatus.daemon.cause === null && scriptStatus.lease?.state === 'free', 'status.ps1 did not return its normal daemon and lease schema.');
 
     const client = await connectGateway(fixture, 'gateway-normal');
@@ -392,6 +392,41 @@ async function taskLease() {
     expect(busy.structuredContent?.owner_parent_pid === process.pid, 'Busy result did not identify the owner parent PID.');
     expect(typeof busy.structuredContent?.owner_gateway_instance_id === 'string', 'Busy result omitted the gateway instance ID.');
     expect(busy.structuredContent?.dispatched === false, 'Busy result reported a dispatched Chrome call.');
+  } finally {
+    await closeFixture(fixture);
+  }
+}
+
+async function transientStatusPipeFailureIsRetried() {
+  const fixture = await createFixture('status-retry');
+  try {
+    const preload = join(repositoryRoot, 'tests', 'status-pipe-failure-preload.cjs');
+    const marker = join(fixture.root, 'status-pipe-failures.log');
+    const nodeOptions = [fixture.env.NODE_OPTIONS, `--require "${preload.replaceAll('\\', '/')}"`].filter(Boolean).join(' ');
+    const baseEnv = {
+      ...fixture.env,
+      NODE_OPTIONS: nodeOptions,
+      CHROME_DEVTOOLS_MCP_TEST_STATUS_FAILURE_MARKER: marker,
+    };
+
+    const recovered = await statusScriptResult(fixture.root, {
+      ...baseEnv,
+      CHROME_DEVTOOLS_MCP_TEST_STATUS_FAILURE_MODE: 'once',
+    });
+    expect(
+      recovered.exitCode === 0 && recovered.value.daemon?.status === 'running',
+      `status.ps1 did not recover from a transient status-pipe connection failure: ${textOf({ exitCode: recovered.exitCode, value: recovered.value, stderr: recovered.stderr })}`,
+    );
+    expect((await readFile(marker, 'utf8')).trim().split(/\r?\n/).length === 1, 'The transient status-pipe failure was not injected exactly once.');
+
+    await writeFile(marker, '', 'utf8');
+    const unavailable = await statusScriptResult(fixture.root, {
+      ...baseEnv,
+      CHROME_DEVTOOLS_MCP_TEST_STATUS_FAILURE_MODE: 'always',
+    });
+    expect(unavailable.exitCode === 3, `Persistent status-pipe failure exited with ${unavailable.exitCode}.`);
+    expect(unavailable.value.daemon?.status === 'unavailable' && unavailable.value.daemon.cause === 'daemon_unreachable', 'The final status-pipe failure did not preserve daemon_unreachable.');
+    expect((await readFile(marker, 'utf8')).trim().split(/\r?\n/).length === 3, 'The status probe did not stop after three bounded attempts.');
   } finally {
     await closeFixture(fixture);
   }
@@ -911,6 +946,7 @@ async function backendGenerationAndDaemonInstanceReset() {
 }
 
 await normalFlowAndInvalidList();
+await transientStatusPipeFailureIsRetried();
 await statusScriptStateFailures();
 await absentDaemonHasSanitizedCause();
 await installPreflightMatrix();

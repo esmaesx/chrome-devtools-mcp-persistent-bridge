@@ -21,6 +21,9 @@ const longRunningTools = new Set([
   'lighthouse_audit', 'navigate_page', 'new_page', 'performance_start_trace',
   'performance_stop_trace', 'take_heapsnapshot', 'wait_for',
 ]);
+const retryableStatusProbeErrors = new Set(['EBUSY', 'ECONNREFUSED', 'ECONNRESET', 'ENOENT', 'EPIPE']);
+const statusProbeAttempts = 3;
+const statusProbeRetryDelayMs = 50;
 
 const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
@@ -355,6 +358,20 @@ function sanitizedDaemonFailure(cause) {
   return { ok: false, status: 'unavailable', cause: 'daemon_unreachable' };
 }
 
+async function requestDaemonStatus() {
+  let lastCause;
+  for (let attempt = 1; attempt <= statusProbeAttempts; attempt += 1) {
+    try {
+      return await requestPipe({ operation: 'status' });
+    } catch (cause) {
+      lastCause = cause;
+      if (attempt === statusProbeAttempts || !retryableStatusProbeErrors.has(cause?.code)) throw cause;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, statusProbeRetryDelayMs));
+    }
+  }
+  throw lastCause;
+}
+
 async function clientMode(argument) {
   if (argument === '--lease-status') {
     process.stdout.write(`${JSON.stringify(await probeLeaseStatus())}\n`);
@@ -363,7 +380,7 @@ async function clientMode(argument) {
   if (argument === '--status') {
     let response;
     try {
-      response = await requestPipe({ operation: 'status' });
+      response = await requestDaemonStatus();
     } catch (cause) {
       process.stdout.write(`${JSON.stringify(sanitizedDaemonFailure(cause))}\n`);
       process.exitCode = 3;
