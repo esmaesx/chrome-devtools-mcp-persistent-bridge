@@ -11,6 +11,22 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
+const usage = 'Usage: stdio-proxy.mjs chrome-devtools [--lease-wait-ms N]; N must be canonical ASCII digits from 750 through 300000.\n';
+
+function parseGatewayArguments(args) {
+  if (args.length === 1 && args[0] === 'chrome-devtools') return undefined;
+  if (args.length === 3 && args[0] === 'chrome-devtools' && args[1] === '--lease-wait-ms') {
+    const rawWait = args[2];
+    if (/^(?:0|[1-9][0-9]*)$/.test(rawWait)) {
+      const parsedWait = Number(rawWait);
+      if (Number.isSafeInteger(parsedWait) && parsedWait >= 750 && parsedWait <= 300_000) return parsedWait;
+    }
+  }
+  process.stderr.write(usage);
+  process.exit(2);
+}
+
+const requestedLeaseWaitMs = parseGatewayArguments(process.argv.slice(2));
 const execFileAsync = promisify(execFile);
 const expectedTools = new Set([
   'click', 'close_page', 'drag', 'emulate', 'evaluate_script', 'fill', 'fill_form',
@@ -25,11 +41,6 @@ const readOnlyTools = new Set([
   'performance_analyze_insight', 'wait_for',
 ]);
 
-if (process.argv.length > 2 && process.argv[2] !== 'chrome-devtools') {
-  process.stderr.write('This gateway exposes only the chrome-devtools server.\n');
-  process.exit(2);
-}
-
 const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
 const recoveryScript = fileURLToPath(new URL('./allow-remote-debugging.ps1', import.meta.url));
@@ -38,9 +49,10 @@ const daemonPipe = `\\\\.\\pipe\\dev-newb-chrome-daemon-${rootHash}`;
 const leasePipe = `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
 const powerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const gatewayInstanceId = randomUUID();
-const leaseWaitMs = process.env.NODE_ENV === 'test' && /^\d{1,4}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS ?? '')
+const defaultLeaseWaitMs = process.env.NODE_ENV === 'test' && /^\d{1,4}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS ?? '')
   ? Math.min(750, Number(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS))
   : 750;
+const leaseWaitMs = requestedLeaseWaitMs ?? defaultLeaseWaitMs;
 const leaseIdleMs = process.env.NODE_ENV === 'test' && /^\d{1,6}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS ?? '')
   ? Number(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS)
   : 10 * 60 * 1000;
@@ -220,13 +232,27 @@ class LeaseBusyError extends Error {
   }
 }
 
+async function closeLeaseCandidate(candidate) {
+  await new Promise((resolveClose, rejectClose) => {
+    try {
+      candidate.close((cause) => {
+        if (cause && cause.code !== 'ERR_SERVER_NOT_RUNNING') rejectClose(cause);
+        else resolveClose();
+      });
+    } catch (cause) {
+      if (cause?.code === 'ERR_SERVER_NOT_RUNNING') resolveClose();
+      else rejectClose(cause);
+    }
+  });
+}
+
 async function acquireTaskLease() {
   if (leaseServer) return;
   const deadline = Date.now() + leaseWaitMs;
   let observedOwner;
   while (Date.now() <= deadline) {
+    const candidate = net.createServer((socket) => serveLeaseStatus(socket, candidate));
     try {
-      const candidate = net.createServer((socket) => serveLeaseStatus(socket, candidate));
       await new Promise((resolveListen, rejectListen) => {
         const onError = (cause) => { candidate.removeListener('listening', onListening); rejectListen(cause); };
         const onListening = () => { candidate.removeListener('error', onError); resolveListen(); };
@@ -239,9 +265,13 @@ async function acquireTaskLease() {
       lastLeaseActivityAt = leaseAcquiredAt;
       return;
     } catch (cause) {
+      await closeLeaseCandidate(candidate);
       if (cause.code !== 'EADDRINUSE') throw cause;
-      const ownerTimeout = Math.max(25, Math.min(100, deadline - Date.now()));
-      if (ownerTimeout > 0) observedOwner = await readLeaseOwner(ownerTimeout);
+      const ownerTimeout = Math.min(100, Math.max(0, deadline - Date.now()));
+      if (ownerTimeout > 0) {
+        observedOwner = await readLeaseOwner(ownerTimeout);
+        if (observedOwner.state !== 'held') throw new LeaseBusyError(observedOwner);
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       await delay(Math.min(25, remaining));
@@ -467,7 +497,7 @@ try {
 observeBackend(manifestResponse);
 const initialManifest = normalizedManifest(manifestResponse.tools);
 const server = new Server(
-  { name: 'chrome-devtools-persistent-gateway', version: '0.1.1' },
+  { name: 'chrome-devtools-persistent-gateway', version: '0.1.2' },
   { capabilities: { tools: {} }, instructions: 'One gateway owns the shared Chrome backend while its lease is active. An idle release clears page state. Discover and select a page before other tools.' },
 );
 const clientTools = [

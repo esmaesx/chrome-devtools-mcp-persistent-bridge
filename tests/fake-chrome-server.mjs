@@ -26,6 +26,14 @@ function consumeOnce(marker) {
   return true;
 }
 
+let activeCalls = 0;
+
+function recordInterval(phase, name) {
+  if (typeof process.env.FAKE_CHROME_INTERVALS_FILE === 'string' && process.env.FAKE_CHROME_INTERVALS_FILE.length > 0) {
+    appendFileSync(process.env.FAKE_CHROME_INTERVALS_FILE, `${JSON.stringify({ phase, name, active_calls: activeCalls })}\n`, 'utf8');
+  }
+}
+
 function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
@@ -33,27 +41,34 @@ function delay(milliseconds) {
 const server = new McpServer({ name: 'fake-chrome-devtools', version: '1.7.0-test' });
 for (const name of names) {
   server.registerTool(name, { description: `Test-only ${name}`, inputSchema: {} }, async (args) => {
-    record(name, args);
-    if (process.env.FAKE_CHROME_DELAY_TOOL === name && /^\d{1,6}$/.test(process.env.FAKE_CHROME_DELAY_MS ?? '')) {
-      await delay(Number(process.env.FAKE_CHROME_DELAY_MS));
+    activeCalls += 1;
+    recordInterval('start', name);
+    try {
+      record(name, args);
+      if (process.env.FAKE_CHROME_DELAY_TOOL === name && /^\d{1,6}$/.test(process.env.FAKE_CHROME_DELAY_MS ?? '')) {
+        await delay(Number(process.env.FAKE_CHROME_DELAY_MS));
+      }
+      if (process.env.FAKE_CHROME_FAIL_TOOL === name && consumeOnce(process.env.FAKE_CHROME_FAIL_ONCE_MARKER)) {
+        setTimeout(() => process.exit(23), 5);
+        await new Promise(() => {});
+      }
+      if (name === 'list_pages' && process.env.FAKE_CHROME_CLOSE_AFTER_LIST === '1' && consumeOnce(process.env.FAKE_CHROME_CLOSE_ONCE_MARKER)) {
+        setTimeout(() => process.exit(0), 50);
+      }
+      if (name === 'list_pages' && process.env.FAKE_CHROME_LIST_CONNECTION_ERROR === '1') {
+        return {
+          content: [{ type: 'text', text: 'Could not connect to Chrome. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.\nCause: test-only permission denial' }],
+          isError: true,
+        };
+      }
+      if (name === 'list_pages' && process.env.FAKE_CHROME_LIST_TOOL_ERROR === '1') {
+        return { content: [{ type: 'text', text: 'Test-only list_pages tool error.' }], isError: true };
+      }
+      return { content: [{ type: 'text', text: JSON.stringify({ ok: true, name, args }) }] };
+    } finally {
+      activeCalls -= 1;
+      recordInterval('end', name);
     }
-    if (process.env.FAKE_CHROME_FAIL_TOOL === name && consumeOnce(process.env.FAKE_CHROME_FAIL_ONCE_MARKER)) {
-      setTimeout(() => process.exit(23), 5);
-      await new Promise(() => {});
-    }
-    if (name === 'list_pages' && process.env.FAKE_CHROME_CLOSE_AFTER_LIST === '1' && consumeOnce(process.env.FAKE_CHROME_CLOSE_ONCE_MARKER)) {
-      setTimeout(() => process.exit(0), 50);
-    }
-    if (name === 'list_pages' && process.env.FAKE_CHROME_LIST_CONNECTION_ERROR === '1') {
-      return {
-        content: [{ type: 'text', text: 'Could not connect to Chrome. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.\nCause: test-only permission denial' }],
-        isError: true,
-      };
-    }
-    if (name === 'list_pages' && process.env.FAKE_CHROME_LIST_TOOL_ERROR === '1') {
-      return { content: [{ type: 'text', text: 'Test-only list_pages tool error.' }], isError: true };
-    }
-    return { content: [{ type: 'text', text: JSON.stringify({ ok: true, name, args }) }] };
   });
 }
 await server.connect(new StdioServerTransport());

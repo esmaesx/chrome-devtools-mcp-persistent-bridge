@@ -20,6 +20,7 @@ This package implements the goal in [ChromeDevTools/chrome-devtools-mcp issue #8
 | Input action | One UI Automation invocation; no fallback click and no second invocation | A UI error can occur after the button already acted. |
 | Result | Reports dialog state, including indeterminate states; a later `list_pages` is the end-to-end check | A closed dialog does not prove approval succeeded. |
 | Shared page state | One cross-process lease with safe idle release; fresh `list_pages` and `select_page` are enforced after each acquisition | A per-call lock permits select-and-act races between tasks. |
+| Lease contention | Configured Codex gateways fail fast after 750 ms; an explicit CLI-only option permits bounded cooperative waiting | A CLI workflow can wait for a live owner without changing the managed Codex gateway or replaying a tool. |
 | Timeouts | 15 seconds for discovery, 60 seconds for normal calls, and 120 seconds for long calls | One short global timeout can leave a mutation running after the caller times out. |
 | Retry | No automatic replay of a mutating call | A timed-out mutation can have completed. |
 | Privacy defaults | Usage statistics, CrUX lookups, and update checks are disabled | A local bridge must not send diagnostic or inspected-URL data by default. |
@@ -45,7 +46,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/prefligh
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -InstallAgentGuidance
 ```
 
-The read-only preflight returns one JSON object. `status: ready` and `cause: lease_free` permit installation. A held 0.1.1 lease returns `lease_held`. An old, invalid, or 0.1.0 lease owner returns `lease_held_unknown`. A live gateway that released its idle lease returns `live_gateway_present` because it can acquire the lease again. The installer runs the same preflight before its first target write.
+The read-only preflight returns one JSON object. `status: ready` and `cause: lease_free` permit installation. An authenticated held lease returns `lease_held`. An old or invalid lease owner that cannot return authenticated status returns `lease_held_unknown`. A live gateway that released its idle lease returns `live_gateway_present` because it can acquire the lease again. The installer runs the same preflight before its first target write.
 
 If preflight is blocked, finish or close every client session that uses this bridge. Wait for the lease to become free. Run the preflight again, and then run the installer again. Do not kill, reap, evict, or force-release a gateway.
 
@@ -65,7 +66,17 @@ npm run doctor
 
 One Codex task owns the bridge from its first Chrome tool call until its MCP gateway exits or the lease is safely idle for 10 minutes. Safe idle means that no tool is active and the gateway tool queue is empty. Idle release changes only gateway state. It does not call Chrome, close a tab, or change a page. It clears saved page and session state. The next lease acquisition must start with `list_pages` and `select_page`.
 
-A second task gets `lease_busy` with limited owner facts, or `held_unknown` for an old or invalid owner. Acquisition fails in less than one second. The bridge does not kill, evict, or reap an owner. It has no lease-release command.
+A normal gateway uses the exact `chrome-devtools` argument and waits for at most 750 ms. It then gets `lease_busy` with limited authenticated owner facts, or `held_unknown` for an old or invalid owner. The result has `dispatched: false` and `automatic_retry_allowed: false`. The managed Codex configuration remains on this fail-fast form.
+
+A Teal CLI gateway process can opt in to bounded cooperative waiting with the exact form below. `N` must use canonical ASCII decimal digits, with no leading zero, and must be from 750 through 300000 milliseconds inclusive.
+
+```powershell
+node runtime\stdio-proxy.mjs chrome-devtools --lease-wait-ms N
+```
+
+The gateway accepts only the default form or that exact three-argument form. A missing value, duplicate flag, extra argument, malformed number, leading zero, or out-of-range value produces one fixed usage line and exit code 2 before daemon access or MCP server construction. The wait changes only lease acquisition before dispatch. While an authenticated owner holds the lease, the candidate closes each failed pipe server and owner-status socket before another bounded attempt. It holds no lease pipe between attempts. It makes no Chrome call, does not replay a tool, and does not release, kill, or evict the owner. An old, invalid, or unauthenticated owner fails immediately as `held_unknown`. A timeout dispatches no tool.
+
+This is bounded cooperative waiting, not a FIFO queue. Competing gateways can acquire in any order. Each successful gateway still must use `list_pages`, then `select_page`, before its target tool. MCP initialization and `tools/list` do not acquire the browser lease and remain available while a tool call waits.
 
 If the persistent daemon is absent, gateway startup writes one bounded, sanitized JSON diagnostic with `status: startup_failed` and `cause: daemon_absent`. `runtime\status.ps1` always writes one schema-version 2 JSON object. It preserves daemon absence as `daemon.status: absent` and `daemon.cause: daemon_absent`. It uses fixed status and cause values for missing or invalid install state and missing Node or daemon files. It exits 0 for a healthy daemon, 3 for a daemon health fault, and 4 for an install-state or runtime fault. It does not include the bearer token, a command line, page data, or a raw local error.
 
@@ -100,7 +111,7 @@ Possible results include `invoked_dialog_closed`, `invoke_error_dialog_closed_in
 - **No network control endpoint:** The package creates no HTTP/TCP/UDP/WebSocket listener.
 - **Actual daemon IPC:** A package-local daemon uses a bearer-token, install-specific Windows named pipe to keep the backend alive. Doctor checks its exact process and network-listener state. The token authenticates a request to the real daemon, but the gateway does not cryptographically authenticate the pipe server. The pipe namespace is enumerable and first-creator-wins. Do not use the package on a shared host with another untrusted local account.
 - **Generation-safe calls:** The daemon never replays a dispatched tool call. Each backend start changes its generation. A stale generation blocks the call and forces a new `list_pages` and `select_page` before a mutation.
-- **Lease-scoped ownership:** The gateway atomically binds a second install-specific named pipe until its process exits or reaches 10 minutes of safe idle time. Idle release clears gateway page state only. The authenticated status operation reports only the owner PID, parent PID, gateway instance ID, acquisition time, last activity, in-flight state, and queue depth. It cannot release or change the lease.
+- **Lease-scoped ownership:** The gateway atomically binds a second install-specific named pipe until its process exits or reaches 10 minutes of safe idle time. Idle release clears gateway page state only. The authenticated status operation reports only the owner PID, parent PID, gateway instance ID, acquisition time, last activity, in-flight state, and queue depth. It cannot release or change the lease. An explicit CLI wait only repeats closed acquisition attempts against an authenticated live owner; it does not reserve a FIFO position.
 - **Outbound privacy:** Chrome DevTools MCP starts with usage statistics and CrUX disabled, and its update-check environment flag is disabled. Browser network traffic requested by a DevTools tool is still possible.
 - **Exact dependency graph:** `npm-shrinkwrap.json` controls `npm ci`. Logon startup uses only package-local files and performs no package download.
 - **Least privilege:** The task runs as the current interactive user with `Limited` run level and fixed absolute paths.
@@ -114,6 +125,7 @@ See [architecture](docs/architecture.md) and [threat model](docs/threat-model.md
 - Windows x64, Node 24, PowerShell 5.1, official Google Chrome, and the exact supported English dialog are the tested scope.
 - Chrome changes, localization, enterprise policy, remote sessions, endpoint security software, or a different native UI shape can make recovery fail closed.
 - The package cannot isolate independent Codex tasks inside one Chrome profile. It permits only one active lease at a time.
+- Bounded cooperative waiting is not FIFO and gives no fairness or acquisition-order guarantee.
 - The bridge cannot protect against another untrusted local account, malware running as the same user, a local administrator, a compromised MCP client, or a person who controls the desktop. A different local account can cause denial of service or pre-bind a predictable pipe name and capture the bearer token. Use a single-trust-user Windows host.
 - The bridge does not make authenticated tabs safe for untrusted automation.
 - Uninstalling the bridge does not revoke a Chrome remote-debugging permission. Use Chrome settings and restart Chrome if you must revoke that state.

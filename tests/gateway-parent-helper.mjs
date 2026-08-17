@@ -8,7 +8,7 @@ const root = resolve(process.argv[2] ?? '');
 const mode = process.argv[3] ?? 'idle';
 if (!root || !['idle', 'mutation'].includes(mode)) throw new Error('Usage: gateway-parent-helper.mjs <fixture-root> <idle|mutation>');
 
-const client = new Client({ name: `gateway-parent-helper-${mode}`, version: '0.1.1' }, { capabilities: {} });
+const client = new Client({ name: `gateway-parent-helper-${mode}`, version: '0.1.2' }, { capabilities: {} });
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, 'runtime', 'stdio-proxy.mjs'), 'chrome-devtools'],

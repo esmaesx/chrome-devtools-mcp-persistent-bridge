@@ -25,7 +25,7 @@ try {
         'runtime/start-daemon.ps1', 'runtime/status.ps1',
         'scripts/common.ps1', 'scripts/install.ps1', 'scripts/uninstall.ps1', 'scripts/doctor.ps1',
         'scripts/lease-preflight.mjs', 'scripts/preflight-install.ps1',
-        'tests/fake-chrome-server.mjs', 'tests/gateway-parent-helper.mjs', 'tests/gateway-smoke.mjs',
+        'tests/fake-chrome-server.mjs', 'tests/gateway-parent-helper.mjs', 'tests/proxy-args.mjs', 'tests/gateway-smoke.mjs',
         'docs/architecture.md', 'docs/threat-model.md', 'docs/operations.md', 'docs/release-checklist.md'
     )
     foreach ($relativePath in $requiredFiles) {
@@ -43,6 +43,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/fake-chrome-server.mjs.' }
     & $node.Source --check tests/gateway-parent-helper.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/gateway-parent-helper.mjs.' }
+    & $node.Source --check tests/proxy-args.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/proxy-args.mjs.' }
     & $node.Source --check tests/gateway-smoke.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/gateway-smoke.mjs.' }
 
@@ -99,6 +101,11 @@ try {
         "process\.once\('uncaughtException'",
         "process\.once\('unhandledRejection'",
         'shutdownDrainMs',
+        'parseGatewayArguments',
+        '--lease-wait-ms',
+        "parsedWait >= 750 && parsedWait <= 300_000",
+        'closeLeaseCandidate',
+        "observedOwner.state !== 'held'",
         'gateway_shutting_down',
         'armIdleLeaseRelease',
         'activeToolCount !== 0',
@@ -115,6 +122,13 @@ try {
     if ([regex]::Matches($proxy, '\.listen\s*\(').Count -ne 1) { throw 'The gateway must contain only its one named-pipe lease listener.' }
     Require-NotText $proxy '(?i)taskkill|Stop-Process|process\.kill|release-backend|evict|reap' 'The gateway must not kill, evict, reap, or expose forced lease release.'
     if ([regex]::Matches($proxy, 'recoveryConsumed\s*=').Count -ne 2) { throw 'Idle lease release must not reset the one-use recovery counter.' }
+    if ([regex]::Matches($proxy, '\bleaseWaitMs\b').Count -ne 2) { throw 'The CLI wait bound must affect only its declaration and acquireTaskLease deadline.' }
+    $argumentParse = $proxy.IndexOf('const requestedLeaseWaitMs = parseGatewayArguments', [StringComparison]::Ordinal)
+    $daemonStartup = $proxy.IndexOf('await readDaemonToken()', [StringComparison]::Ordinal)
+    $serverConstruction = $proxy.IndexOf('const server = new Server(', [StringComparison]::Ordinal)
+    if ($argumentParse -lt 0 -or $daemonStartup -lt 0 -or $serverConstruction -lt 0 -or $argumentParse -ge $daemonStartup -or $argumentParse -ge $serverConstruction) {
+        throw 'Gateway arguments must be validated before daemon access and MCP Server construction.'
+    }
 
     foreach ($requiredPattern in @(
         'dev-newb-chrome-daemon-', 'timingSafeEqual', 'daemon_instance_id', 'expectedInstanceId',
@@ -169,6 +183,7 @@ try {
         'authenticated status is unavailable', 'if \(\$SkipScheduledTask\)', 'Unregister-ScheduledTask'
     )) { Require-Text $installer $requiredPattern "Installer control is missing: $requiredPattern" }
     Require-NotText $installer '(?i)\bnpx(?:\.cmd)?\b' 'Install and logon paths must not use npx.'
+    Require-NotText $installer '--lease-wait-ms' 'The managed Codex gateway configuration must remain fail-fast.'
     $preflightInvocation = $installer.IndexOf('$installPreflight = Get-BridgeInstallPreflight', [StringComparison]::Ordinal)
     $firstTargetWrite = $installer.IndexOf('New-Item -ItemType Directory -Force -Path $InstallRoot, $CodexHome, $backupRoot', $preflightInvocation, [StringComparison]::Ordinal)
     if ($preflightInvocation -lt 0 -or $firstTargetWrite -lt 0 -or $preflightInvocation -ge $firstTargetWrite) {
@@ -222,6 +237,20 @@ try {
     $shrinkwrapText = Get-Content -LiteralPath npm-shrinkwrap.json -Raw
     if ($package.os -notcontains 'win32' -or $package.cpu -notcontains 'x64') { throw 'package.json must declare the tested Windows x64 scope.' }
     if ([string]$package.engines.node -ne '>=24 <25') { throw 'package.json must declare the tested Node 24 range.' }
+    $shrinkwrapTopVersion = '^(?:\uFEFF)?\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.2"'
+    $shrinkwrapRootVersion = '""\s*:\s*\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.2"'
+    if ([string]$package.version -ne '0.1.2' -or $shrinkwrapText -notmatch $shrinkwrapTopVersion -or $shrinkwrapText -notmatch $shrinkwrapRootVersion) {
+        throw 'Package and shrinkwrap release identities must all be 0.1.2.'
+    }
+    foreach ($identity in @(
+        @{ Text = $proxy; Pattern = "name: 'chrome-devtools-persistent-gateway', version: '0\.1\.2'"; Label = 'gateway runtime' },
+        @{ Text = $daemon; Pattern = "name: 'chrome-devtools-persistent-daemon', version: '0\.1\.2'"; Label = 'daemon runtime' },
+        @{ Text = $installer; Pattern = "package_version = '0\.1\.2'"; Label = 'installer state' },
+        @{ Text = (Get-Content -LiteralPath tests\gateway-parent-helper.mjs -Raw); Pattern = "version: '0\.1\.2'"; Label = 'parent helper' },
+        @{ Text = (Get-Content -LiteralPath tests\gateway-smoke.mjs -Raw); Pattern = "version: '0\.1\.2'"; Label = 'gateway test client' }
+    )) {
+        Require-Text $identity.Text $identity.Pattern "The $($identity.Label) release identity is not 0.1.2."
+    }
     foreach ($pin in @{
         '@modelcontextprotocol/sdk' = '1.29.0'; 'chrome-devtools-mcp' = '1.7.0'; zod = '4.4.3'
     }.GetEnumerator()) {
@@ -373,6 +402,8 @@ try {
         }
     }
 
+    & $node.Source tests/proxy-args.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Gateway argument test failed.' }
     & npm.cmd pack --dry-run --json *> $null
     if ($LASTEXITCODE -ne 0) { throw 'npm pack dry run failed.' }
     & $node.Source tests/gateway-smoke.mjs

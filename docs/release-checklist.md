@@ -27,7 +27,13 @@ Complete every check on Windows before release.
 - [ ] The lease releases only on gateway shutdown or after 10 minutes with an empty queue and no active tool.
 - [ ] Idle release makes no Chrome call, clears selected-page and session state, and does not reset the recovery counter.
 - [ ] Stdio end, close, and error plus front-transport close and fatal errors start one bounded shutdown path.
-- [ ] A busy acquisition fails within one second with `lease_busy` owner facts or `held_unknown`. It does not kill, evict, or reap an owner.
+- [ ] The default gateway waits at most 750 ms plus the deterministic test tolerance, then returns authenticated `lease_busy`, `dispatched: false`, and `automatic_retry_allowed: false` without a Chrome dispatch.
+- [ ] Only exact `chrome-devtools` or `chrome-devtools --lease-wait-ms N` is accepted. Canonical ASCII `N` is 750 through 300000. Missing, duplicate, extra, malformed, leading-zero, and out-of-range forms exit 2 with one bounded sanitized usage line before daemon access or MCP Server construction.
+- [ ] Opt-in bounded cooperative waiting continues only for an authenticated owner. It closes every failed candidate server and owner-status socket, holds no lease pipe between attempts, and fails immediately for `held_unknown` or invalid status.
+- [ ] A cooperative-wait timeout dispatches zero tools and does not replay, release, kill, or evict an owner.
+- [ ] With an authenticated owner and at least two waiting gateways, MCP initialization and `tools/list` complete within the normal bound without acquiring the lease.
+- [ ] A three-client test proves that both waiters can complete after prior owners close, backend Chrome tool dispatch never overlaps, and each session enforces `list_pages`, `select_page`, then its target tool.
+- [ ] Documentation calls the option bounded cooperative waiting and states that it is not FIFO and gives no fairness guarantee.
 - [ ] Authenticated lease status is read-only, bypasses the Chrome queue, and returns only the approved owner facts.
 - [ ] `status.ps1` reports daemon health and `free`, `held`, or `held_unknown` lease state separately. It does not restart or stop a process.
 - [ ] An absent daemon produces bounded `daemon_absent` output from gateway startup and `status.ps1`, without a raw pipe error or sensitive data.
@@ -42,6 +48,7 @@ Complete every check on Windows before release.
 ## Install and removal checks
 
 - [ ] The installer completes as staged installation with rollback on detected failure.
+- [ ] The managed Codex configuration is unchanged and contains no lease-wait option.
 - [ ] The installer runs the lease and gateway preflight before its first target write.
 - [ ] Installer-owned configuration and the managed install root have expected ownership and access controls.
 - [ ] The authenticated package-local daemon IPC is inspected with doctor before normal use.

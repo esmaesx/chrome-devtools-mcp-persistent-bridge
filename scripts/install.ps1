@@ -352,7 +352,7 @@ $($script:AgentsEnd)
 
         $state = [ordered]@{
             schema_version = 1
-            package_version = '0.1.1'
+            package_version = '0.1.2'
             installed_at_utc = [DateTime]::UtcNow.ToString('o')
             install_root = $InstallRoot
             codex_home = $CodexHome

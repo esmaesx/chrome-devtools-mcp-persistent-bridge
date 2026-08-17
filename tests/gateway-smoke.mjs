@@ -56,6 +56,18 @@ async function waitForCondition(callback, timeoutMs, message) {
   throw new Error(message);
 }
 
+async function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, rejectTimeout) => { timer = setTimeout(() => rejectTimeout(new Error(message)), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function waitForProcessExit(pid, timeoutMs = 3_000) {
   await waitForCondition(() => !processIsLive(pid), timeoutMs, `Test process ${pid} did not exit.`);
 }
@@ -212,6 +224,11 @@ async function eventCount(path, name) {
   }
 }
 
+async function readJsonLines(path) {
+  const text = await readFile(path, 'utf8');
+  return text.trim().length === 0 ? [] : text.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+}
+
 async function daemonCommand(root, argument) {
   return execFileAsync(process.execPath, [join(root, 'runtime', 'daemon.mjs'), argument], {
     cwd: root,
@@ -272,7 +289,7 @@ async function createFixture(label, overrides = {}) {
     await cp(join(repositoryRoot, 'runtime', file), join(root, 'runtime', file));
   }
   await symlink(nodeModules, join(root, 'node_modules'), 'junction');
-  await writeFile(join(root, 'install-state.json'), JSON.stringify({ install_root: root, daemon_token: 'a'.repeat(64), node_path: process.execPath }), 'utf8');
+  await writeFile(join(root, 'install-state.json'), JSON.stringify({ install_root: root, daemon_token: 'a'.repeat(64), node_path: process.execPath, package_version: '0.1.2' }), 'utf8');
   const env = {
     ...process.env,
     NODE_ENV: 'test',
@@ -286,11 +303,13 @@ async function createFixture(label, overrides = {}) {
   return fixture;
 }
 
-async function connectGateway(fixture, name) {
-  const client = new Client({ name, version: '0.1.1' }, { capabilities: {} });
+async function connectGateway(fixture, name, { leaseWaitMs } = {}) {
+  const client = new Client({ name, version: '0.1.2' }, { capabilities: {} });
+  const args = [join(fixture.root, 'runtime', 'stdio-proxy.mjs'), 'chrome-devtools'];
+  if (leaseWaitMs !== undefined) args.push('--lease-wait-ms', String(leaseWaitMs));
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [join(fixture.root, 'runtime', 'stdio-proxy.mjs'), 'chrome-devtools'],
+    args,
     cwd: fixture.root,
     env: fixture.env,
     stderr: 'pipe',
@@ -394,6 +413,107 @@ async function taskLease() {
     expect(busy.structuredContent?.dispatched === false, 'Busy result reported a dispatched Chrome call.');
   } finally {
     await closeFixture(fixture);
+  }
+}
+
+async function defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing() {
+  const events = join(tmpdir(), `chrome-bridge-default-wait-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const fixture = await createFixture('default-wait', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS: '',
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    FAKE_CHROME_EVENTS_FILE: events,
+  });
+  try {
+    const owner = await connectGateway(fixture, 'gateway-default-wait-owner');
+    expect(!(await call(owner, 'list_pages')).isError, 'Default-wait owner did not acquire the lease.');
+
+    const defaultClient = await connectGateway(fixture, 'gateway-default-wait-candidate');
+    const defaultStarted = Date.now();
+    const defaultBusy = await call(defaultClient, 'list_pages');
+    const defaultElapsed = Date.now() - defaultStarted;
+    expectError(defaultBusy, 'lease_busy', 'The default gateway did not return authenticated lease_busy.');
+    expect(defaultElapsed >= 600 && defaultElapsed <= 1_250, `The default 750 ms lease wait took ${defaultElapsed} ms.`);
+    expect(defaultBusy.structuredContent?.lease_state === 'held', 'The default gateway did not authenticate the owner.');
+    expect(defaultBusy.structuredContent?.owner_pid === fixtureTransportPid(fixture, owner), 'The default busy result did not identify the owner.');
+    expect(defaultBusy.structuredContent?.dispatched === false && defaultBusy.structuredContent?.automatic_retry_allowed === false, 'The default busy result permitted dispatch or automatic retry.');
+    expect((await eventCount(events, 'list_pages')) === 1, 'The default lease timeout dispatched a Chrome tool.');
+
+    const boundedWaiter = await connectGateway(fixture, 'gateway-explicit-timeout-candidate', { leaseWaitMs: 900 });
+    const queuedBusy = await call(boundedWaiter, 'list_pages');
+    expectError(queuedBusy, 'lease_busy', 'The bounded queue timeout did not return lease_busy.');
+    expect(queuedBusy.structuredContent?.dispatched === false && queuedBusy.structuredContent?.automatic_retry_allowed === false, 'The bounded queue timeout permitted dispatch or automatic retry.');
+    expect((await eventCount(events, 'list_pages')) === 1, 'The bounded queue timeout dispatched a Chrome tool.');
+  } finally {
+    await closeFixture(fixture);
+    await rm(events, { force: true });
+  }
+}
+
+async function cooperativeWaitersKeepMcpControlResponsive() {
+  const events = join(tmpdir(), `chrome-bridge-cooperative-events-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const intervals = `${events}.intervals`;
+  const fixture = await createFixture('cooperative-wait', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    FAKE_CHROME_DELAY_TOOL: 'take_snapshot',
+    FAKE_CHROME_DELAY_MS: '150',
+    FAKE_CHROME_EVENTS_FILE: events,
+    FAKE_CHROME_INTERVALS_FILE: intervals,
+  });
+  const clients = [];
+  try {
+    const owner = await connectGateway(fixture, 'gateway-cooperative-owner');
+    clients.push(owner);
+    const completeSequence = async (client, label) => {
+      expectError(await call(client, 'take_snapshot'), 'blocked_discovery_required', `${label} did not require list_pages first.`);
+      expect(!(await call(client, 'list_pages')).isError, `${label} list_pages failed.`);
+      expectError(await call(client, 'take_snapshot'), 'blocked_selection_required', `${label} did not require select_page before its target tool.`);
+      expect(!(await call(client, 'select_page')).isError, `${label} select_page failed.`);
+      expect(!(await call(client, 'take_snapshot')).isError, `${label} target tool failed.`);
+      return label;
+    };
+    expect(await completeSequence(owner, 'owner') === 'owner', 'The owner sequence did not complete.');
+
+    const initializeStarted = Date.now();
+    const waiters = await Promise.all([
+      connectGateway(fixture, 'gateway-cooperative-waiter-a', { leaseWaitMs: 10_000 }),
+      connectGateway(fixture, 'gateway-cooperative-waiter-b', { leaseWaitMs: 10_000 }),
+    ]);
+    clients.push(...waiters);
+    expect(Date.now() - initializeStarted <= 2_500, 'Cooperative waiter initialization waited for the browser lease.');
+
+    const settled = [false, false];
+    const flows = waiters.map((client, index) => completeSequence(client, `waiter-${index + 1}`).finally(() => { settled[index] = true; }));
+    await delay(150);
+    expect(settled.every((value) => value === false), 'A waiter completed while the authenticated owner still held the lease.');
+    expect((await eventCount(events, 'list_pages')) === 1, 'A cooperative waiter dispatched list_pages while the owner held the lease.');
+
+    const toolsStarted = Date.now();
+    const toolLists = await withTimeout(Promise.all(waiters.map((client) => client.listTools())), 1_500, 'tools/list was blocked behind cooperative lease waiting.');
+    expect(Date.now() - toolsStarted <= 1_500, 'tools/list exceeded its normal bound during cooperative lease waiting.');
+    expect(toolLists.every((result) => result.tools.length === 30), 'A cooperative waiter received an incomplete tool manifest.');
+
+    await closeGateway(fixture, owner);
+    clients.splice(clients.indexOf(owner), 1);
+    const firstLabel = await withTimeout(Promise.race(flows), 6_000, 'No cooperative waiter acquired the released lease.');
+    const firstIndex = firstLabel === 'waiter-1' ? 0 : 1;
+    await closeGateway(fixture, waiters[firstIndex]);
+    clients.splice(clients.indexOf(waiters[firstIndex]), 1);
+    const secondIndex = firstIndex === 0 ? 1 : 0;
+    expect(await withTimeout(flows[secondIndex], 6_000, 'The second cooperative waiter did not acquire after the prior waiter closed.') === `waiter-${secondIndex + 1}`, 'The second waiter returned the wrong completion identity.');
+    await closeGateway(fixture, waiters[secondIndex]);
+    clients.splice(clients.indexOf(waiters[secondIndex]), 1);
+
+    const dispatched = await readJsonLines(events);
+    const expectedOrder = ['list_pages', 'select_page', 'take_snapshot', 'list_pages', 'select_page', 'take_snapshot', 'list_pages', 'select_page', 'take_snapshot'];
+    expect(dispatched.length === expectedOrder.length && dispatched.every((entry, index) => entry.name === expectedOrder[index]), 'The three client sessions did not dispatch the required discovery-selection-target sequence.');
+    const timing = await readJsonLines(intervals);
+    expect(timing.length === expectedOrder.length * 2, 'The fake backend did not record a complete dispatch interval for each tool.');
+    expect(timing.every((entry) => (entry.phase === 'start' && entry.active_calls === 1) || (entry.phase === 'end' && entry.active_calls === 0)), 'Fake backend Chrome tool dispatch overlapped between gateways.');
+  } finally {
+    for (const client of clients) await closeGateway(fixture, client);
+    await closeFixture(fixture);
+    await rm(events, { force: true });
+    await rm(intervals, { force: true });
   }
 }
 
@@ -755,11 +875,11 @@ async function heldUnknownAndStatusAreReadOnly() {
       oldOwner.listen(leasePipeFor(fixture.root));
     });
     expect((await parsedDaemonStatus(fixture.root)).lease?.state === 'held_unknown', 'Invalid lease owner was not reported as held_unknown.');
-    const client = await connectGateway(fixture, 'gateway-held-unknown');
+    const client = await connectGateway(fixture, 'gateway-held-unknown', { leaseWaitMs: 5_000 });
     const started = Date.now();
     const blocked = await call(client, 'list_pages');
     expectError(blocked, 'held_unknown', 'Gateway did not fail closed for an invalid lease owner.');
-    expect(Date.now() - started <= 1_000, 'Invalid lease owner did not fail within one second.');
+    expect(Date.now() - started <= 750, 'Invalid lease owner waited instead of failing immediately.');
 
     const scriptStatus = await parsedScriptStatus(fixture.root);
     expect(scriptStatus.daemon?.status === 'running', 'status.ps1 did not report daemon health separately.');
@@ -951,6 +1071,8 @@ await statusScriptStateFailures();
 await absentDaemonHasSanitizedCause();
 await installPreflightMatrix();
 await taskLease();
+await defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing();
+await cooperativeWaitersKeepMcpControlResponsive();
 await stdinCloseAndShortSessionsReleaseLease();
 await idleReleaseRequiresFreshDiscoveryAndSelection();
 await idleTimerDoesNotReleaseActiveOrQueuedTools();

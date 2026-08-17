@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 - 2026-08-17
+
+- Add exact CLI opt-in `chrome-devtools --lease-wait-ms N` for bounded cooperative lease waiting from 750 through 300000 ms.
+- Keep the managed Codex gateway unchanged and fail-fast at 750 ms.
+- Reject missing, duplicate, extra, malformed, leading-zero, and out-of-range arguments with one bounded sanitized usage error and exit code 2 before daemon access, lease binding, Chrome access, or MCP Server construction.
+- Continue acquisition attempts only while the current lease owner returns valid authenticated status. Fail immediately for `held_unknown` or invalid status.
+- Close every failed candidate server and owner-status socket and hold no lease pipe between attempts.
+- Make waiting affect only pre-dispatch lease acquisition. It does not dispatch or replay a Chrome tool, release a lease, or kill or evict an owner. A timeout dispatches zero tools and forbids automatic retry.
+- Keep MCP initialization and `tools/list` lease-free and responsive while tool calls wait.
+- Add a three-client handoff test that verifies eventual completion after prior owners close, no overlapping fake-backend Chrome dispatch, and `list_pages` -> `select_page` -> target-tool order for every session.
+- Document that cooperative waiting is bounded and is not FIFO or a fairness guarantee.
+
 ## 0.1.1 - 2026-08-17
 
 - Release a gateway lease after 10 minutes of safe idle time and clear its page state without a Chrome call.

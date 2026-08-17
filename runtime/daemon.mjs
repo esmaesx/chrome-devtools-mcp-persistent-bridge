@@ -173,7 +173,7 @@ function testBackendEntry() {
 
 async function connectBackend() {
   if (backendClient) return backendClient;
-  const client = new Client({ name: 'chrome-devtools-persistent-daemon', version: '0.1.1' }, { capabilities: {} });
+  const client = new Client({ name: 'chrome-devtools-persistent-daemon', version: '0.1.2' }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [testBackendEntry(), '--autoConnect', '--no-usage-statistics', '--no-performance-crux'],

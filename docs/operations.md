@@ -25,6 +25,22 @@ A package-local daemon keeps one Chrome DevTools MCP process alive. Per-task std
 
 This bridge is not a browser sandbox. The allowed tools can read or change all exposed tabs. Use a separate Chrome profile without sensitive accounts, active payment methods, or unrelated authenticated services. A mutating timeout or transport closure is indeterminate. Do not replay the mutation automatically.
 
+## Bounded CLI lease waiting
+
+The managed Codex configuration uses `chrome-devtools` only. It remains fail-fast with a 750 ms lease-acquisition bound. Do not add a wait option to the managed block.
+
+A Teal CLI gateway process that must cooperate with another authenticated bridge owner can start the same proxy with:
+
+```powershell
+node runtime\stdio-proxy.mjs chrome-devtools --lease-wait-ms N
+```
+
+Use canonical ASCII decimal `N` from 750 through 300000 inclusive. Do not use a sign, spaces, decimal point, exponent, Unicode digits, or a leading zero. The proxy rejects a missing value, repeated flag, extra argument, malformed value, or out-of-range value. It writes one fixed usage line and exits 2 before it contacts the daemon or constructs its MCP server.
+
+This option provides bounded cooperative waiting, not FIFO order. The gateway repeatedly competes for the one lease only while the current owner returns authenticated status. Each failed candidate server and status socket closes before the next attempt. The waiter holds no lease pipe between attempts. An invalid or unauthenticated owner returns `held_unknown` immediately. The wait does not dispatch a Chrome tool, replay a tool, or release, stop, kill, or evict an owner. A timeout has `dispatched: false` and `automatic_retry_allowed: false`.
+
+Initialization and `tools/list` do not acquire the lease. They can complete while another tool call waits. After a waiter acquires the lease, it must call `list_pages`, then `select_page`, then its target tool. When that CLI session is complete, close its MCP gateway so another waiting client can compete for the lease.
+
 ## Audit and diagnosis
 
 Recovery attempts append JSON Lines records to `logs/recovery-audit.jsonl`. The log records timestamp, status, mutation state, process/window identifiers, and a short result detail. It is locally rotated. Treat it as operational metadata: restrict file access because process identifiers can still be useful to a local attacker.
