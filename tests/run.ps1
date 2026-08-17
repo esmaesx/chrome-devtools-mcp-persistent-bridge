@@ -24,6 +24,8 @@ try {
         'runtime/daemon.mjs', 'runtime/stdio-proxy.mjs', 'runtime/allow-remote-debugging.ps1',
         'runtime/start-daemon.ps1', 'runtime/status.ps1',
         'scripts/common.ps1', 'scripts/install.ps1', 'scripts/uninstall.ps1', 'scripts/doctor.ps1',
+        'scripts/lease-preflight.mjs', 'scripts/preflight-install.ps1',
+        'tests/fake-chrome-server.mjs', 'tests/gateway-parent-helper.mjs', 'tests/gateway-smoke.mjs',
         'docs/architecture.md', 'docs/threat-model.md', 'docs/operations.md', 'docs/release-checklist.md'
     )
     foreach ($relativePath in $requiredFiles) {
@@ -33,8 +35,14 @@ try {
 
     & $node.Source --check runtime/stdio-proxy.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for runtime/stdio-proxy.mjs.' }
+    & $node.Source --check runtime/daemon.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for runtime/daemon.mjs.' }
+    & $node.Source --check scripts/lease-preflight.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for scripts/lease-preflight.mjs.' }
     & $node.Source --check tests/fake-chrome-server.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/fake-chrome-server.mjs.' }
+    & $node.Source --check tests/gateway-parent-helper.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/gateway-parent-helper.mjs.' }
     & $node.Source --check tests/gateway-smoke.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Node syntax check failed for tests/gateway-smoke.mjs.' }
 
@@ -81,6 +89,23 @@ try {
         'await acquireTaskLease\(\)',
         'dev-newb-chrome-control-',
         'candidate\.listen\(leasePipe\)',
+        'serveLeaseStatus',
+        'timingSafeEqual',
+        "errorResult\('lease_busy'",
+        "errorResult\('held_unknown'",
+        "process\.stdin\.once\('end'",
+        "process\.stdin\.once\('close'",
+        "process\.stdin\.once\('error'",
+        "process\.once\('uncaughtException'",
+        "process\.once\('unhandledRejection'",
+        'shutdownDrainMs',
+        'gateway_shutting_down',
+        'armIdleLeaseRelease',
+        'activeToolCount !== 0',
+        'queuedToolCount !== 0',
+        "pageState = 'need_list'",
+        'daemon_absent',
+        'startup_failed',
         'indeterminate_mutating_call',
         'backend tool manifest changed',
         'isAutoConnectPermissionError',
@@ -88,15 +113,37 @@ try {
     )) { Require-Text $proxy $requiredPattern "Gateway control is missing: $requiredPattern" }
     Require-NotText $proxy '(?i)--(?:http|port|host)|https?\.createServer|createServer\s*\(\s*\{|\.listen\s*\(\s*\d|WebSocketServer|createSocket\s*\(' 'The gateway must not create an HTTP, TCP, UDP, or WebSocket listener.'
     if ([regex]::Matches($proxy, '\.listen\s*\(').Count -ne 1) { throw 'The gateway must contain only its one named-pipe lease listener.' }
-    Require-NotText $proxy 'leaseReleaseTimer|ageMs\s*>' 'The task lease must not expire while its owner is alive.'
+    Require-NotText $proxy '(?i)taskkill|Stop-Process|process\.kill|release-backend|evict|reap' 'The gateway must not kill, evict, reap, or expose forced lease release.'
+    if ([regex]::Matches($proxy, 'recoveryConsumed\s*=').Count -ne 2) { throw 'Idle lease release must not reset the one-use recovery counter.' }
 
     foreach ($requiredPattern in @(
         'dev-newb-chrome-daemon-', 'timingSafeEqual', 'daemon_instance_id', 'expectedInstanceId',
         'expectedGeneration', 'maxTotalTimeout: timeoutFor\(name\)', 'CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS',
-        '--no-usage-statistics', '--no-performance-crux', 'dispatched: true', 'stale_backend_generation'
+        '--no-usage-statistics', '--no-performance-crux', 'dispatched: true', 'stale_backend_generation',
+        'probeLeaseStatus', '--lease-status', 'sanitizedDaemonFailure', 'daemon_absent',
+        'readOnlyControlOperations', 'bypassesChromeQueue', 'rejectsBeforeChromeQueue',
+        "error\('shutting_down'.*dispatched: false", "stopping && request\.operation === 'callTool'",
+        "state: 'held_unknown'", "state: 'free'"
     )) { Require-Text $daemon $requiredPattern "Daemon control is missing: $requiredPattern" }
     Require-NotText $daemon '(?i)mcporter|\bnpx(?:\.cmd)?\b|--(?:http|port|host)|https?\.createServer|\.listen\s*\(\s*\d|WebSocketServer|createSocket\s*\(' 'The daemon must not use MCPorter, runtime downloads, or a network listener.'
     if ([regex]::Matches($daemon, 'client\.callTool\s*\(').Count -ne 1) { throw 'The daemon must have exactly one backend dispatch site.' }
+
+    $statusScript = Get-Content -LiteralPath runtime\status.ps1 -Raw
+    foreach ($requiredPattern in @(
+        '--lease-status', 'Write-BridgeStatus', 'daemon = [ordered]', 'lease = $LeaseStatus',
+        "state = 'held_unknown'", 'daemonFailureCause', 'daemon_absent', 'install_state_missing',
+        'install_state_invalid', 'node_runtime_missing', 'daemon_runtime_missing', 'status_internal_error'
+    )) {
+        Require-Text $statusScript ([regex]::Escape($requiredPattern)) "Status reporting is missing: $requiredPattern"
+    }
+    Require-NotText $statusScript '(?i)Stop-Process|Start-Process|taskkill|orphan|--stop' 'Status must not stop, start, restart, or classify an orphan process.'
+
+    $preflightScript = Get-Content -LiteralPath scripts\preflight-install.ps1 -Raw
+    $leaseProbe = Get-Content -LiteralPath scripts\lease-preflight.mjs -Raw
+    foreach ($requiredPattern in @('Get-BridgeInstallPreflight', 'lease_held_unknown', 'Finish or close all client sessions', 'Wait for the lease to become free')) {
+        Require-Text $preflightScript ([regex]::Escape($requiredPattern)) "Install preflight is missing: $requiredPattern"
+    }
+    Require-NotText ($preflightScript + $leaseProbe) '(?i)Stop-Process|Start-Process|taskkill|process\.kill|--stop|release|evict|reap' 'Install preflight must not stop, kill, release, evict, or reap a process or lease.'
 
     foreach ($requiredPattern in @(
         'Get-AuthenticodeSignature',
@@ -117,10 +164,16 @@ try {
         'npm-shrinkwrap\.json', 'Set-OwnerOnlyDirectoryAcl', 'currentConfig -cne \$oldConfig',
         'config_block_sha256', 'task_action_arguments', 'task_principal_sid', 'RunLevel Limited',
         'Invoke-NodeDaemonControl', 'Build-StagedCandidatePayload', 'Move-PayloadItems',
+        'Get-BridgeInstallPreflight', 'leaseProbePath', 'Install preflight refused the in-place update',
         'DEV_NEWB_BRIDGE_TEST_FAIL_AFTER_PAYLOAD_SWAP', 'failed-payload', 'Restore old payload', 'Verify restored old payload', 'rollbackSafeForTaskRestart',
         'authenticated status is unavailable', 'if \(\$SkipScheduledTask\)', 'Unregister-ScheduledTask'
     )) { Require-Text $installer $requiredPattern "Installer control is missing: $requiredPattern" }
     Require-NotText $installer '(?i)\bnpx(?:\.cmd)?\b' 'Install and logon paths must not use npx.'
+    $preflightInvocation = $installer.IndexOf('$installPreflight = Get-BridgeInstallPreflight', [StringComparison]::Ordinal)
+    $firstTargetWrite = $installer.IndexOf('New-Item -ItemType Directory -Force -Path $InstallRoot, $CodexHome, $backupRoot', $preflightInvocation, [StringComparison]::Ordinal)
+    if ($preflightInvocation -lt 0 -or $firstTargetWrite -lt 0 -or $preflightInvocation -ge $firstTargetWrite) {
+        throw 'The read-only install preflight must complete before the first target write.'
+    }
     foreach ($requiredPattern in @('File\]::Replace', 'File\]::Move', 'File\]::ReadAllText', 'verified-write temporary path', '\[ref\]\$Committed', '\$Committed\.Value = \$true')) {
         Require-Text $common $requiredPattern "Verified atomic write control is missing: $requiredPattern"
     }
@@ -150,8 +203,9 @@ try {
 
     foreach ($phrase in @(
         'Important change from the original issue comment', 'issuecomment-4965356923',
-        'no HTTP/TCP control listener', 'allow_remote_debugging', 'task-lifetime cross-process lease',
-        'One Codex task', 'not a browser sandbox', 'all exposed Chrome tabs',
+        'no HTTP/TCP control listener', 'allow_remote_debugging', 'cross-process lease with safe idle release',
+        'One Codex task', '10 minutes', 'held_unknown', 'not a browser sandbox', 'all exposed Chrome tabs',
+        'preflight-install.ps1', 'lease_held_unknown', 'live_gateway_present', 'daemon_absent',
         'separate Chrome profile without sensitive accounts', 'Browser content is untrusted',
         'mutating timeout or closed transport is indeterminate', 'do not replay that mutation',
         'does not revoke a Chrome remote-debugging permission', 'same user',

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
 import { join, resolve } from 'node:path';
@@ -37,9 +37,23 @@ const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('
 const daemonPipe = `\\\\.\\pipe\\dev-newb-chrome-daemon-${rootHash}`;
 const leasePipe = `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
 const powerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+const gatewayInstanceId = randomUUID();
+const leaseWaitMs = process.env.NODE_ENV === 'test' && /^\d{1,4}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS ?? '')
+  ? Math.min(750, Number(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS))
+  : 750;
+const leaseIdleMs = process.env.NODE_ENV === 'test' && /^\d{1,6}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS ?? '')
+  ? Number(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS)
+  : 10 * 60 * 1000;
+const shutdownDrainMs = process.env.NODE_ENV === 'test' && /^\d{1,6}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_SHUTDOWN_DRAIN_MS ?? '')
+  ? Number(process.env.CHROME_DEVTOOLS_MCP_TEST_SHUTDOWN_DRAIN_MS)
+  : 130_000;
 
 let daemonToken;
 let leaseServer;
+const leaseSockets = new Set();
+let leaseAcquiredAt;
+let lastLeaseActivityAt;
+let leaseIdleTimer;
 let recoveryEligible = false;
 let recoveryConsumed = false;
 let firstValidListPagesPending = true;
@@ -47,7 +61,12 @@ let pageState = 'need_list';
 let backendGeneration;
 let backendInstanceId;
 let callQueue = Promise.resolve();
+let queuedToolCount = 0;
+let activeToolCount = 0;
 let shuttingDown = false;
+let shutdownPromise;
+let exitScheduled = false;
+let requestedExitCode = 0;
 
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
@@ -72,15 +91,142 @@ async function readDaemonToken() {
   daemonToken = parsed.daemon_token;
 }
 
+function startupFailureCause(cause) {
+  if (cause?.bridgeCause) return cause.bridgeCause;
+  if (cause?.code === 'ENOENT') return 'daemon_absent';
+  if (cause?.message === 'The daemon request timed out.') return 'daemon_timeout';
+  if (cause?.message === 'The authenticated daemon install state is unavailable.' || cause?.message === 'The authenticated daemon token is missing from install state.' || cause?.message === 'The daemon install state does not belong to this install root.') return 'install_state_unavailable';
+  return 'daemon_unreachable';
+}
+
+function exitForStartupFailure(cause) {
+  process.stderr.write(`${JSON.stringify({
+    schema_version: 1,
+    component: 'chrome-devtools-persistent-gateway',
+    status: 'startup_failed',
+    cause: startupFailureCause(cause),
+    retryable: true,
+  })}\n`);
+  process.exit(3);
+}
+
+function isAuthorizedLeaseStatus(value) {
+  if (typeof value !== 'string' || typeof daemonToken !== 'string') return false;
+  const expected = Buffer.from(daemonToken, 'utf8');
+  const candidate = Buffer.from(value, 'utf8');
+  return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+}
+
+function leaseStatusSnapshot() {
+  return {
+    pid: process.pid,
+    parent_pid: process.ppid,
+    gateway_instance_id: gatewayInstanceId,
+    acquired_at_utc: new Date(leaseAcquiredAt).toISOString(),
+    last_activity_at_utc: new Date(lastLeaseActivityAt).toISOString(),
+    in_flight: activeToolCount > 0,
+    queue_depth: queuedToolCount,
+  };
+}
+
+function serveLeaseStatus(socket, ownerServer) {
+  leaseSockets.add(socket);
+  socket.once('close', () => leaseSockets.delete(socket));
+  socket.setEncoding('utf8');
+  socket.setTimeout(500, () => socket.destroy());
+  let buffer = '';
+  let answered = false;
+  socket.on('data', (chunk) => {
+    if (answered) return;
+    buffer += chunk;
+    if (buffer.length > 4096) {
+      answered = true;
+      socket.destroy();
+      return;
+    }
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) return;
+    answered = true;
+    const line = buffer.slice(0, newline).trim();
+    if (buffer.slice(newline + 1).trim().length > 0 || line.length === 0) {
+      socket.destroy();
+      return;
+    }
+    let request;
+    try { request = JSON.parse(line); } catch { socket.destroy(); return; }
+    if (!isPlainObject(request) || request.operation !== 'status' || !isAuthorizedLeaseStatus(request.token)) {
+      socket.destroy();
+      return;
+    }
+    if (leaseServer !== ownerServer || !Number.isFinite(leaseAcquiredAt) || !Number.isFinite(lastLeaseActivityAt)) {
+      socket.destroy();
+      return;
+    }
+    socket.end(`${JSON.stringify(leaseStatusSnapshot())}\n`);
+  });
+  socket.on('error', () => undefined);
+}
+
+function isValidHeldLeaseStatus(value) {
+  if (!isPlainObject(value)) return false;
+  const expectedKeys = [
+    'acquired_at_utc', 'gateway_instance_id', 'in_flight', 'last_activity_at_utc',
+    'parent_pid', 'pid', 'queue_depth',
+  ];
+  const actualKeys = Object.keys(value).sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) return false;
+  return Number.isSafeInteger(value.pid) && value.pid > 0
+    && Number.isSafeInteger(value.parent_pid) && value.parent_pid >= 0
+    && typeof value.gateway_instance_id === 'string' && value.gateway_instance_id.length > 0
+    && Number.isFinite(Date.parse(value.acquired_at_utc))
+    && Number.isFinite(Date.parse(value.last_activity_at_utc))
+    && typeof value.in_flight === 'boolean'
+    && Number.isSafeInteger(value.queue_depth) && value.queue_depth >= 0;
+}
+
+function readLeaseOwner(timeout) {
+  return new Promise((resolveStatus) => {
+    const socket = net.createConnection(leasePipe);
+    let buffer = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveStatus(value);
+    };
+    const timer = setTimeout(() => finish({ state: 'held_unknown' }), timeout);
+    socket.setEncoding('utf8');
+    socket.once('error', () => finish({ state: 'held_unknown' }));
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      if (buffer.length > 16 * 1024) return finish({ state: 'held_unknown' });
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      let response;
+      try { response = JSON.parse(buffer.slice(0, newline)); } catch { return finish({ state: 'held_unknown' }); }
+      finish(isValidHeldLeaseStatus(response) ? { state: 'held', ...response } : { state: 'held_unknown' });
+    });
+    socket.once('connect', () => socket.write(`${JSON.stringify({ operation: 'status', token: daemonToken })}\n`));
+  });
+}
+
+class LeaseBusyError extends Error {
+  constructor(lease) {
+    super(lease.state === 'held' ? 'The persistent Chrome bridge lease is held by another gateway.' : 'The persistent Chrome bridge lease is held by an unknown or older gateway.');
+    this.name = 'LeaseBusyError';
+    this.lease = lease;
+  }
+}
+
 async function acquireTaskLease() {
   if (leaseServer) return;
-  const testWait = process.env.NODE_ENV === 'test' && /^\d{1,5}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS ?? '')
-    ? Number(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS)
-    : 30_000;
-  const deadline = Date.now() + testWait;
-  while (Date.now() < deadline) {
+  const deadline = Date.now() + leaseWaitMs;
+  let observedOwner;
+  while (Date.now() <= deadline) {
     try {
-      const candidate = net.createServer((socket) => socket.destroy());
+      const candidate = net.createServer((socket) => serveLeaseStatus(socket, candidate));
       await new Promise((resolveListen, rejectListen) => {
         const onError = (cause) => { candidate.removeListener('listening', onListening); rejectListen(cause); };
         const onListening = () => { candidate.removeListener('error', onError); resolveListen(); };
@@ -89,20 +235,83 @@ async function acquireTaskLease() {
         candidate.listen(leasePipe);
       });
       leaseServer = candidate;
+      leaseAcquiredAt = Date.now();
+      lastLeaseActivityAt = leaseAcquiredAt;
       return;
     } catch (cause) {
       if (cause.code !== 'EADDRINUSE') throw cause;
-      await delay(100);
+      const ownerTimeout = Math.max(25, Math.min(100, deadline - Date.now()));
+      if (ownerTimeout > 0) observedOwner = await readLeaseOwner(ownerTimeout);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await delay(Math.min(25, remaining));
     }
   }
-  throw new Error('The persistent Chrome bridge is in use by another Codex task. Finish that task before this task uses Chrome.');
+  throw new LeaseBusyError(observedOwner ?? { state: 'held_unknown' });
 }
 
-async function releaseTaskLease() {
+function clearIdleLeaseTimer() {
+  if (!leaseIdleTimer) return;
+  clearTimeout(leaseIdleTimer);
+  leaseIdleTimer = undefined;
+}
+
+function clearLeaseScopedState() {
+  pageState = 'need_list';
+  backendGeneration = undefined;
+  backendInstanceId = undefined;
+  recoveryEligible = false;
+}
+
+async function releaseTaskLease({ resetState = true } = {}) {
+  clearIdleLeaseTimer();
   if (!leaseServer) return;
   const server = leaseServer;
   leaseServer = undefined;
+  leaseAcquiredAt = undefined;
+  lastLeaseActivityAt = undefined;
+  if (resetState) clearLeaseScopedState();
+  for (const socket of leaseSockets) socket.destroy();
   await new Promise((resolveClose) => server.close(resolveClose));
+}
+
+function armIdleLeaseRelease() {
+  clearIdleLeaseTimer();
+  if (!leaseServer || activeToolCount !== 0 || queuedToolCount !== 0 || shuttingDown) return;
+  const expectedServer = leaseServer;
+  leaseIdleTimer = setTimeout(() => {
+    leaseIdleTimer = undefined;
+    if (leaseServer !== expectedServer || activeToolCount !== 0 || queuedToolCount !== 0 || shuttingDown) return;
+    void releaseTaskLease({ resetState: true });
+  }, leaseIdleMs);
+  leaseIdleTimer.unref?.();
+}
+
+function leaseBusyResult(cause, tool) {
+  const lease = cause.lease?.state === 'held' ? cause.lease : { state: 'held_unknown' };
+  if (lease.state === 'held') {
+    return errorResult('lease_busy', 'The Chrome bridge lease is held by another live gateway. No Chrome tool was dispatched.', {
+      tool,
+      dispatched: false,
+      retry_allowed: true,
+      automatic_retry_allowed: false,
+      lease_state: lease.state,
+      owner_pid: lease.pid,
+      owner_parent_pid: lease.parent_pid,
+      owner_gateway_instance_id: lease.gateway_instance_id,
+      acquired_at_utc: lease.acquired_at_utc,
+      last_activity_at_utc: lease.last_activity_at_utc,
+      in_flight: lease.in_flight,
+      queue_depth: lease.queue_depth,
+    });
+  }
+  return errorResult('held_unknown', 'The Chrome bridge lease is held by an older or invalid gateway that did not return authenticated owner status. No Chrome tool was dispatched.', {
+    tool,
+    dispatched: false,
+    retry_allowed: true,
+    automatic_retry_allowed: false,
+    lease_state: 'held_unknown',
+  });
 }
 
 function daemonRequest(operation, payload = {}, timeout = 130_000) {
@@ -163,12 +372,17 @@ function isAutoConnectPermissionError(result) {
 }
 
 async function invokeChromeTool(name, args) {
-  await acquireTaskLease();
   const validListPages = name === 'list_pages' && hasNoArguments(args);
   if (name === 'list_pages' && !validListPages) return errorResult('blocked_arguments', 'list_pages accepts an empty argument object only.');
   if (name !== 'list_pages' && !isPlainObject(args)) return errorResult('blocked_arguments', 'Chrome tool arguments must be an object.');
   if (pageState === 'need_list' && name !== 'list_pages') return errorResult('blocked_discovery_required', 'Call list_pages before another Chrome tool in this task.');
   if (pageState === 'need_select' && name !== 'list_pages' && name !== 'select_page') return errorResult('blocked_selection_required', 'Call select_page after list_pages before another Chrome tool in this task.');
+  try {
+    await acquireTaskLease();
+  } catch (cause) {
+    if (cause instanceof LeaseBusyError) return leaseBusyResult(cause, name);
+    throw cause;
+  }
 
   const wasFirstCall = firstValidListPagesPending;
   if (name === 'list_pages') firstValidListPagesPending = false;
@@ -214,9 +428,14 @@ async function invokeChromeTool(name, args) {
 }
 
 async function invokeRecovery(args) {
-  await acquireTaskLease();
   if (!hasNoArguments(args)) return errorResult('blocked_arguments', 'The recovery action accepts no arguments.', { mutated: false });
   if (!recoveryEligible || recoveryConsumed) return errorResult('blocked_not_eligible', 'Recovery is available one time only after this task’s first dispatched list_pages call fails.', { mutated: false });
+  try {
+    await acquireTaskLease();
+  } catch (cause) {
+    if (cause instanceof LeaseBusyError) return leaseBusyResult(cause, 'allow_remote_debugging');
+    throw cause;
+  }
   recoveryConsumed = true;
   recoveryEligible = false;
   try {
@@ -233,14 +452,23 @@ async function invokeRecovery(args) {
   }
 }
 
-await readDaemonToken();
-const manifestResponse = await daemonRequest('listTools', {}, 20_000);
-if (!manifestResponse?.ok) throw new Error(manifestResponse?.detail || 'The reviewed daemon tool manifest is unavailable.');
+let manifestResponse;
+try {
+  await readDaemonToken();
+  manifestResponse = await daemonRequest('listTools', {}, 5_000);
+  if (!manifestResponse?.ok) {
+    const cause = new Error('The reviewed daemon tool manifest is unavailable.');
+    cause.bridgeCause = 'daemon_invalid_status';
+    throw cause;
+  }
+} catch (cause) {
+  exitForStartupFailure(cause);
+}
 observeBackend(manifestResponse);
 const initialManifest = normalizedManifest(manifestResponse.tools);
 const server = new Server(
-  { name: 'chrome-devtools-persistent-gateway', version: '0.1.0' },
-  { capabilities: { tools: {} }, instructions: 'One task owns the shared Chrome backend until this MCP process exits. Discover and select a page before other tools.' },
+  { name: 'chrome-devtools-persistent-gateway', version: '0.1.1' },
+  { capabilities: { tools: {} }, instructions: 'One gateway owns the shared Chrome backend while its lease is active. An idle release clears page state. Discover and select a page before other tools.' },
 );
 const clientTools = [
   ...initialManifest,
@@ -250,17 +478,49 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: clientToo
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   if (name !== 'allow_remote_debugging' && !expectedTools.has(name)) return errorResult('blocked_unknown_tool', 'The requested tool is not in the pinned gateway allowlist.');
-  const operation = callQueue.then(() => (name === 'allow_remote_debugging' ? invokeRecovery(args) : invokeChromeTool(name, args)));
+  if (shuttingDown) return errorResult('gateway_shutting_down', 'The gateway parent transport closed. No new tool call was accepted.');
+  clearIdleLeaseTimer();
+  queuedToolCount += 1;
+  const operation = callQueue.then(async () => {
+    queuedToolCount -= 1;
+    if (shuttingDown) return errorResult('gateway_shutting_down', 'The gateway parent transport closed. The queued tool was not dispatched.', { dispatched: false });
+    activeToolCount += 1;
+    try {
+      return await (name === 'allow_remote_debugging' ? invokeRecovery(args) : invokeChromeTool(name, args));
+    } finally {
+      activeToolCount -= 1;
+      if (leaseServer) lastLeaseActivityAt = Date.now();
+      armIdleLeaseRelease();
+    }
+  });
   callQueue = operation.catch(() => undefined);
   return operation;
 });
 
 async function shutdown() {
-  if (shuttingDown) return;
+  if (shutdownPromise) return shutdownPromise;
   shuttingDown = true;
-  await releaseTaskLease();
+  clearIdleLeaseTimer();
+  shutdownPromise = (async () => {
+    if (activeToolCount > 0 || queuedToolCount > 0) {
+      await Promise.race([callQueue.catch(() => undefined), delay(shutdownDrainMs)]);
+    }
+    await releaseTaskLease({ resetState: true });
+  })();
+  return shutdownPromise;
 }
-for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void shutdown().finally(() => process.exit(0)); });
+function shutdownAndExit(exitCode = 0) {
+  if (Number.isSafeInteger(exitCode)) requestedExitCode = Math.max(requestedExitCode, exitCode);
+  if (exitScheduled) return;
+  exitScheduled = true;
+  void shutdown().finally(() => process.exit(requestedExitCode));
+}
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => shutdownAndExit(0));
 const frontTransport = new StdioServerTransport();
-frontTransport.onclose = () => { void shutdown(); };
+frontTransport.onclose = () => shutdownAndExit(0);
+process.stdin.once('end', () => shutdownAndExit(0));
+process.stdin.once('close', () => shutdownAndExit(0));
+process.stdin.once('error', () => shutdownAndExit(1));
+process.once('uncaughtException', () => shutdownAndExit(1));
+process.once('unhandledRejection', () => shutdownAndExit(1));
 await server.connect(frontTransport);

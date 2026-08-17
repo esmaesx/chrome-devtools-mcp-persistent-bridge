@@ -24,25 +24,33 @@ pinned Chrome DevTools MCP
 
 The daemon pipe accepts only the small `status`, `listTools`, `callTool`, and `stop` protocol with the installed random bearer token. This is one-way request authentication. The gateway does not authenticate the pipe server. Windows pipe names are enumerable and first-creator-wins, so another untrusted local account can pre-bind the name, deny service, or impersonate the daemon and receive the token. This project supports only a single-trust-user Windows host. It is also not a defense against the same Windows user or an administrator. The install root and audit directory use an owner-and-SYSTEM ACL. Doctor checks the daemon process identity and network-listener state after connection, but this does not make the initial pipe connection mutually authenticated.
 
-## Task-lifetime lease
+## Lease-scoped ownership
 
-The first Chrome or recovery call atomically binds an install-specific local Windows named pipe. The gateway holds that pipe until its MCP process exits. Windows removes the binding when the process exits, so stale-file deletion cannot race with a new owner. The gateway does not release the lease after a tool call and does not expire a live owner by age.
+The first Chrome or eligible recovery call atomically binds an install-specific local Windows named pipe. The gateway holds that pipe until its MCP process exits or the lease is safely idle for 10 minutes. Safe idle means that no tool is active and the gateway queue is empty. Idle release changes gateway state only. It makes no Chrome, tab, page, or backend call. It clears selected-page and backend-session state, sets the page state to `need_list`, and does not reset the one-use recovery counter.
 
-The lease pipe accepts no commands and immediately closes any connection. It is an ownership primitive, not an authentication boundary. Another process under the same Windows user, or another local account with pipe access, can deny service by binding it first.
+The gateway also releases the lease when stdio ends or closes, the front transport closes, a fatal error occurs, or the process receives a termination signal. Shutdown is idempotent. It lets the active call finish for a bounded time. It does not dispatch a queued call after shutdown starts.
 
-Another task waits for up to 30 seconds, then returns a busy error. It cannot interleave `select_page` and a later mutation with the owner task. Windows removes the lease-pipe binding when the owning gateway exits.
+The lease pipe accepts one bearer-token-authenticated, read-only `status` request. The response contains only the gateway PID, parent PID, gateway instance ID, acquisition time, last activity time, in-flight state, and queue depth. Status does not use the Chrome tool queue and cannot call Chrome, release a lease, or change gateway state. There is no release command.
 
-After lease acquisition, the gateway enforces `list_pages`, then `select_page`, before another Chrome tool. The lease does not stop a person or a separate browser tool from changing Chrome.
+Another gateway tries to acquire the lease for at most 750 ms. It then returns `lease_busy` with the limited owner facts, or `held_unknown` when an old or invalid owner does not return valid authenticated status. It does not kill, evict, or reap the owner. Windows removes the pipe binding when its gateway exits.
+
+The update preflight probes this lease without binding, releasing, or changing it. It also checks for a live gateway process that can reacquire an idle-released lease. A known owner, an old or invalid owner, or unknown gateway presence blocks an in-place update before the installer writes to its target. The operator must finish or close the owning client session and run preflight again.
+
+After each lease acquisition, the gateway enforces `list_pages`, then `select_page`, before another Chrome tool. The lease does not stop a person or a separate browser tool from changing Chrome.
 
 ## Tool execution and timeouts
 
-Calls are serialized in both the gateway and daemon. Discovery has a 15-second internal budget, normal tools have 60 seconds, and long operations have 120 seconds. The daemon does not replay a dispatched call. Each backend start increments a generation. The gateway supplies the expected generation, so a backend restart blocks later calls and forces fresh discovery and selection. A reconnect must expose the same reviewed names, descriptions, and input schemas or the gateway fails closed.
+Chrome tool calls are serialized in both the gateway and daemon. Authenticated daemon status and cached manifest reads bypass the Chrome queue. They do not call Chrome or change browser state. This lets a new gateway start and return authenticated lease owner facts while another gateway has a long Chrome call in flight. Discovery has a 15-second internal budget, normal tools have 60 seconds, and long operations have 120 seconds. The daemon does not replay a dispatched call. Each backend start increments a generation. The gateway supplies the expected generation, so a backend restart blocks later calls and forces fresh discovery and selection. A reconnect must expose the same reviewed names, descriptions, and input schemas or the gateway fails closed.
+
+After an authenticated stop request is accepted, the daemon rejects each later Chrome tool with `shutting_down` and `dispatched: false`. This gate applies to calls that are already behind stop in the queue and to calls that arrive after stop changes the daemon state. A later `list_pages` cannot reconnect the backend. Read-only status and cached manifest requests remain control operations and do not call Chrome.
+
+Gateway startup gives the cached daemon manifest request a 5-second bound. The cached read does not wait behind a Chrome call. An absent daemon produces one sanitized machine-readable `daemon_absent` cause. The diagnostic does not contain the daemon token, command lines, page data, or the raw named-pipe error.
 
 A timed-out read operation returns a read failure. A timed-out mutation returns `indeterminate_mutating_call` and states that it can have completed. The gateway does not replay it.
 
 ## Recovery path
 
-Recovery is inside the same gateway and shares the same task-lifetime lease. It is eligible only when that gateway’s first Chrome call was a valid empty-argument `list_pages`, the daemon dispatched it, and it failed. A local argument rejection or an MCP tool result with `isError` does not enable recovery. Eligibility is one-use.
+Recovery is inside the same gateway and shares the same lease. It is eligible only when that gateway’s first Chrome call was a valid empty-argument `list_pages`, the daemon dispatched it, and it failed. A local argument rejection or an MCP tool result with `isError` does not enable recovery. Eligibility is one-use, and idle lease release does not reset it.
 
 `allow-remote-debugging.ps1` validates the recorded Chrome path and signature, process session and start time, top-level native class and owner, UI Automation window type, absence of a web `Document` descendant, and the exact supported English warning text and controls. It rebuilds and rechecks that UI tree immediately before one UI Automation invocation.
 

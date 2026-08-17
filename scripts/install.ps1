@@ -157,6 +157,11 @@ $InstallRoot = Assert-SafeLiteralPath -Path $InstallRoot -Label 'InstallRoot'
 $CodexHome = Assert-SafeLiteralPath -Path $CodexHome -Label 'CodexHome'
 $packageRoot = [System.IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
 $nodePath = Get-NodeExecutable
+$leaseProbePath = Join-Path $packageRoot 'scripts\lease-preflight.mjs'
+$installPreflight = Get-BridgeInstallPreflight -InstallRoot $InstallRoot -NodePath $nodePath -ProbePath $leaseProbePath
+if (-not [bool]$installPreflight.ok) {
+    throw "Install preflight refused the in-place update ($([string]$installPreflight.cause)). Finish or close all client sessions that use this bridge. Wait for the lease to become free. Run scripts\preflight-install.ps1 again, then run scripts\install.ps1 again."
+}
 $officialChromePath = Resolve-OfficialChromePath -ChromePath $ChromePath
 $configPath = Join-Path $CodexHome 'config.toml'
 $agentsPath = Join-Path $CodexHome 'AGENTS.md'
@@ -347,7 +352,7 @@ $($script:AgentsEnd)
 
         $state = [ordered]@{
             schema_version = 1
-            package_version = '0.1.0'
+            package_version = '0.1.1'
             installed_at_utc = [DateTime]::UtcNow.ToString('o')
             install_root = $InstallRoot
             codex_home = $CodexHome
