@@ -24,7 +24,16 @@ Complete every check on Windows before release.
 - [ ] A backend-generation change blocks mutation until fresh `list_pages` and `select_page` complete.
 - [ ] Usage statistics, CrUX, and update checks are disabled in the fixed backend launch.
 - [ ] Native class, modal owner, process start, and absence of web `Document` content are checked again before invocation.
-- [ ] The task-lifetime named-pipe lease stays active until the gateway exits. It has no live-owner time expiry and no stale-file deletion race.
+- [ ] The lease releases only on gateway shutdown or after 10 minutes with an empty queue and no active tool.
+- [ ] Idle release makes no Chrome call, clears selected-page and session state, and does not reset the recovery counter.
+- [ ] Stdio end, close, and error plus front-transport close and fatal errors start one bounded shutdown path.
+- [ ] A busy acquisition fails within one second with `lease_busy` owner facts or `held_unknown`. It does not kill, evict, or reap an owner.
+- [ ] Authenticated lease status is read-only, bypasses the Chrome queue, and returns only the approved owner facts.
+- [ ] `status.ps1` reports daemon health and `free`, `held`, or `held_unknown` lease state separately. It does not restart or stop a process.
+- [ ] An absent daemon produces bounded `daemon_absent` output from gateway startup and `status.ps1`, without a raw pipe error or sensitive data.
+- [ ] Read-only install preflight accepts a free lease and refuses known, legacy, invalid, or potentially reacquirable gateway ownership.
+- [ ] A refused preflight makes no target change and does not kill, reap, evict, release, stop, or restart anything.
+- [ ] Preflight instructions require the owning client session to finish or close before the operator waits for lease release and runs the check again.
 - [ ] Documentation says that browser content is untrusted and this is not a browser sandbox.
 - [ ] Documentation recommends a separate Chrome profile without sensitive accounts.
 - [ ] Documentation says that a mutating timeout is indeterminate and must not be replayed.
@@ -33,6 +42,7 @@ Complete every check on Windows before release.
 ## Install and removal checks
 
 - [ ] The installer completes as staged installation with rollback on detected failure.
+- [ ] The installer runs the lease and gateway preflight before its first target write.
 - [ ] Installer-owned configuration and the managed install root have expected ownership and access controls.
 - [ ] The authenticated package-local daemon IPC is inspected with doctor before normal use.
 - [ ] Doctor reports daemon status and no network listener mode.

@@ -16,6 +16,7 @@ const expectedTools = new Set([
   'resize_page', 'select_page', 'take_heapsnapshot', 'take_screenshot', 'take_snapshot',
   'type_text', 'upload_file', 'wait_for',
 ]);
+const readOnlyControlOperations = new Set(['status', 'listTools']);
 const longRunningTools = new Set([
   'lighthouse_audit', 'navigate_page', 'new_page', 'performance_start_trace',
   'performance_stop_trace', 'take_heapsnapshot', 'wait_for',
@@ -23,7 +24,9 @@ const longRunningTools = new Set([
 
 const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
-const pipe = `\\\\.\\pipe\\dev-newb-chrome-daemon-${createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24)}`;
+const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
+const pipe = `\\\\.\\pipe\\dev-newb-chrome-daemon-${rootHash}`;
+const leasePipe = `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
 const productionBackendEntry = join(installRoot, 'node_modules', 'chrome-devtools-mcp', 'build', 'src', 'bin', 'chrome-devtools-mcp.js');
 
 function isPlainObject(value) {
@@ -78,6 +81,51 @@ function isAuthorized(value) {
   return candidate.length === daemonToken.length && timingSafeEqual(candidate, daemonToken);
 }
 
+function isValidHeldLeaseStatus(value) {
+  if (!isPlainObject(value)) return false;
+  const expectedKeys = [
+    'acquired_at_utc', 'gateway_instance_id', 'in_flight', 'last_activity_at_utc',
+    'parent_pid', 'pid', 'queue_depth',
+  ];
+  const actualKeys = Object.keys(value).sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) return false;
+  return Number.isSafeInteger(value.pid) && value.pid > 0
+    && Number.isSafeInteger(value.parent_pid) && value.parent_pid >= 0
+    && typeof value.gateway_instance_id === 'string' && value.gateway_instance_id.length > 0
+    && Number.isFinite(Date.parse(value.acquired_at_utc))
+    && Number.isFinite(Date.parse(value.last_activity_at_utc))
+    && typeof value.in_flight === 'boolean'
+    && Number.isSafeInteger(value.queue_depth) && value.queue_depth >= 0;
+}
+
+function probeLeaseStatus(timeout = 400) {
+  return new Promise((resolveStatus) => {
+    const socket = net.createConnection(leasePipe);
+    let buffer = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveStatus(value);
+    };
+    const timer = setTimeout(() => finish({ state: 'held_unknown' }), timeout);
+    socket.setEncoding('utf8');
+    socket.once('error', (cause) => finish(cause.code === 'ENOENT' ? { state: 'free' } : { state: 'held_unknown' }));
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      if (buffer.length > 16 * 1024) return finish({ state: 'held_unknown' });
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      let response;
+      try { response = JSON.parse(buffer.slice(0, newline)); } catch { return finish({ state: 'held_unknown' }); }
+      finish(isValidHeldLeaseStatus(response) ? { state: 'held', ...response } : { state: 'held_unknown' });
+    });
+    socket.once('connect', () => socket.write(`${JSON.stringify({ operation: 'status', token: state.daemon_token })}\n`));
+  });
+}
+
 function normalizedManifest(tools) {
   const seen = new Set();
   for (const tool of tools ?? []) {
@@ -122,7 +170,7 @@ function testBackendEntry() {
 
 async function connectBackend() {
   if (backendClient) return backendClient;
-  const client = new Client({ name: 'chrome-devtools-persistent-daemon', version: '0.1.0' }, { capabilities: {} });
+  const client = new Client({ name: 'chrome-devtools-persistent-daemon', version: '0.1.1' }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [testBackendEntry(), '--autoConnect', '--no-usage-statistics', '--no-performance-crux'],
@@ -204,11 +252,13 @@ async function dispatch(request) {
         daemon_instance_id: daemonInstanceId,
         backend_connected: Boolean(backendClient),
         backend_generation: backendGeneration,
+        lease: await probeLeaseStatus(),
       };
     case 'listTools':
       if (!backendManifest) return error('backend_manifest_unavailable', 'The reviewed backend manifest is unavailable.', { dispatched: false });
       return { ok: true, tools: backendManifest, daemon_instance_id: daemonInstanceId, backend_generation: backendGeneration };
     case 'callTool':
+      if (stopping) return error('shutting_down', 'The daemon is shutting down. No Chrome tool was dispatched.', { dispatched: false });
       return callTool(request);
     case 'stop':
       if (stopping) return { ok: true, status: 'stopping', pid: process.pid };
@@ -247,8 +297,11 @@ function serveConnection(socket) {
     let request;
     try { request = JSON.parse(line); } catch { return fail(); }
     answered = true;
-    const operation = queue.then(() => dispatch(request));
-    queue = operation.catch(() => undefined);
+    const isReadOnlyControl = isPlainObject(request) && readOnlyControlOperations.has(request.operation);
+    const rejectsBeforeChromeQueue = isPlainObject(request) && stopping && request.operation === 'callTool';
+    const bypassesChromeQueue = isReadOnlyControl || rejectsBeforeChromeQueue;
+    const operation = bypassesChromeQueue ? dispatch(request) : queue.then(() => dispatch(request));
+    if (!bypassesChromeQueue) queue = operation.catch(() => undefined);
     operation.then((response) => {
       writeResponse(socket, response);
       if (response.stop_after_response === true) setTimeout(() => { void shutdown().finally(() => process.exit(0)); }, 0);
@@ -296,14 +349,35 @@ function requestPipe(request, timeout = 5_000) {
   });
 }
 
+function sanitizedDaemonFailure(cause) {
+  if (cause?.code === 'ENOENT') return { ok: false, status: 'absent', cause: 'daemon_absent' };
+  if (cause?.message === 'The daemon pipe request timed out.') return { ok: false, status: 'unresponsive', cause: 'daemon_timeout' };
+  return { ok: false, status: 'unavailable', cause: 'daemon_unreachable' };
+}
+
 async function clientMode(argument) {
+  if (argument === '--lease-status') {
+    process.stdout.write(`${JSON.stringify(await probeLeaseStatus())}\n`);
+    return;
+  }
   if (argument === '--status') {
-    const response = await requestPipe({ operation: 'status' });
-    if (!response.ok || response.status !== 'running') throw new Error(response.detail || 'The daemon is unavailable.');
+    let response;
+    try {
+      response = await requestPipe({ operation: 'status' });
+    } catch (cause) {
+      process.stdout.write(`${JSON.stringify(sanitizedDaemonFailure(cause))}\n`);
+      process.exitCode = 3;
+      return;
+    }
+    if (!response?.ok || response.status !== 'running') {
+      process.stdout.write(`${JSON.stringify({ ok: false, status: 'invalid', cause: 'daemon_invalid_status' })}\n`);
+      process.exitCode = 3;
+      return;
+    }
     process.stdout.write(`${JSON.stringify(response)}\n`);
     return;
   }
-  if (argument !== '--stop') throw new Error('Usage: daemon.mjs [--status|--stop]');
+  if (argument !== '--stop') throw new Error('Usage: daemon.mjs [--status|--lease-status|--stop]');
   const prior = await requestPipe({ operation: 'status' });
   if (!prior.ok || prior.status !== 'running' || !Number.isSafeInteger(prior.pid)) throw new Error(prior.detail || 'The daemon is unavailable.');
   const requested = await requestPipe({ operation: 'stop' });

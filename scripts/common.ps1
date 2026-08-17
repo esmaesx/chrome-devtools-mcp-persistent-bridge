@@ -44,6 +44,76 @@ function Get-NodeExecutable {
     return $nodePath
 }
 
+function Invoke-ReadOnlyLeaseProbe {
+    param(
+        [Parameter(Mandatory)][string]$NodePath,
+        [Parameter(Mandatory)][string]$ProbePath,
+        [Parameter(Mandatory)][string]$InstallRoot
+    )
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = [System.IO.Path]::GetFullPath($NodePath)
+    $processInfo.Arguments = '"' + ([System.IO.Path]::GetFullPath($ProbePath)).Replace('"', '\"') + '" --from-environment'
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $processInfo.EnvironmentVariables['DEV_NEWB_BRIDGE_PREFLIGHT_ROOT'] = [System.IO.Path]::GetFullPath($InstallRoot)
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    try {
+        if (-not $process.Start()) { return [pscustomobject]@{ state = 'held_unknown' } }
+        if (-not $process.WaitForExit(3000)) { return [pscustomobject]@{ state = 'held_unknown' } }
+        $standardOutput = $process.StandardOutput.ReadToEnd().Trim()
+        if ($process.ExitCode -ne 0) { return [pscustomobject]@{ state = 'held_unknown' } }
+        try { $lease = $standardOutput | ConvertFrom-Json } catch { return [pscustomobject]@{ state = 'held_unknown' } }
+        if (@('free', 'held', 'held_unknown') -notcontains [string]$lease.state) { return [pscustomobject]@{ state = 'held_unknown' } }
+        return $lease
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Get-BridgeInstallPreflight {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$NodePath,
+        [Parameter(Mandatory)][string]$ProbePath
+    )
+    $fullInstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+    $lease = Invoke-ReadOnlyLeaseProbe -NodePath $NodePath -ProbePath $ProbePath -InstallRoot $fullInstallRoot
+    $gatewayState = 'unknown'
+    try {
+        $proxyPath = [System.IO.Path]::GetFullPath((Join-Path $fullInstallRoot 'runtime\stdio-proxy.mjs'))
+        $escapedProxyPath = [regex]::Escape($proxyPath)
+        $gateways = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            [string]$_.CommandLine -match $escapedProxyPath -and
+            [string]$_.CommandLine -match '(?:^|\s|["''])chrome-devtools(?:["'']|\s|$)'
+        })
+        $gatewayState = if ($gateways.Count -gt 0) { 'present' } else { 'absent' }
+    } catch {
+        $gatewayState = 'unknown'
+    }
+
+    $instructions = @(
+        'Finish or close all client sessions that use this bridge.',
+        'Wait for the lease to become free.',
+        'Run the preflight again. Then run the installer again.'
+    )
+    if ([string]$lease.state -eq 'held') {
+        return [pscustomobject][ordered]@{ schema_version = 1; ok = $false; status = 'blocked'; cause = 'lease_held'; lease = $lease; gateway_state = $gatewayState; instructions = $instructions }
+    }
+    if ([string]$lease.state -eq 'held_unknown') {
+        return [pscustomobject][ordered]@{ schema_version = 1; ok = $false; status = 'blocked'; cause = 'lease_held_unknown'; lease = $lease; gateway_state = $gatewayState; instructions = $instructions }
+    }
+    if ($gatewayState -eq 'present') {
+        return [pscustomobject][ordered]@{ schema_version = 1; ok = $false; status = 'blocked'; cause = 'live_gateway_present'; lease = $lease; gateway_state = $gatewayState; instructions = $instructions }
+    }
+    if ($gatewayState -ne 'absent') {
+        return [pscustomobject][ordered]@{ schema_version = 1; ok = $false; status = 'blocked'; cause = 'gateway_presence_unknown'; lease = $lease; gateway_state = $gatewayState; instructions = $instructions }
+    }
+    return [pscustomobject][ordered]@{ schema_version = 1; ok = $true; status = 'ready'; cause = 'lease_free'; lease = $lease; gateway_state = $gatewayState; instructions = @() }
+}
+
 function Resolve-OfficialChromePath {
     param([string]$ChromePath)
     $candidates = [System.Collections.Generic.List[string]]::new()

@@ -26,10 +26,17 @@ function consumeOnce(marker) {
   return true;
 }
 
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
 const server = new McpServer({ name: 'fake-chrome-devtools', version: '1.7.0-test' });
 for (const name of names) {
   server.registerTool(name, { description: `Test-only ${name}`, inputSchema: {} }, async (args) => {
     record(name, args);
+    if (process.env.FAKE_CHROME_DELAY_TOOL === name && /^\d{1,6}$/.test(process.env.FAKE_CHROME_DELAY_MS ?? '')) {
+      await delay(Number(process.env.FAKE_CHROME_DELAY_MS));
+    }
     if (process.env.FAKE_CHROME_FAIL_TOOL === name && consumeOnce(process.env.FAKE_CHROME_FAIL_ONCE_MARKER)) {
       setTimeout(() => process.exit(23), 5);
       await new Promise(() => {});
