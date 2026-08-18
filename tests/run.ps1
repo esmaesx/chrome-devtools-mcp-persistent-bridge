@@ -88,10 +88,10 @@ try {
         'recoveryConsumed = true',
         "pageState === 'need_list'",
         "pageState === 'need_select'",
-        'await acquireTaskLease\(\)',
+        'await acquireTaskLease\(signal\)',
         'dev-newb-chrome-control-',
         'candidate\.listen\(leasePipe\)',
-        'serveLeaseStatus',
+        'serveLeaseControl',
         'timingSafeEqual',
         "errorResult\('lease_busy'",
         "errorResult\('held_unknown'",
@@ -108,6 +108,12 @@ try {
         "observedOwner.state !== 'held'",
         'gateway_shutting_down',
         'armIdleLeaseRelease',
+        'lease_instance_id',
+        'requestLeaseYield',
+        'yield_ack',
+        'yieldPending',
+        'leaseYieldQuietGraceMs',
+        'extra\.signal',
         'activeToolCount !== 0',
         'queuedToolCount !== 0',
         "pageState = 'need_list'",
@@ -237,19 +243,19 @@ try {
     $shrinkwrapText = Get-Content -LiteralPath npm-shrinkwrap.json -Raw
     if ($package.os -notcontains 'win32' -or $package.cpu -notcontains 'x64') { throw 'package.json must declare the tested Windows x64 scope.' }
     if ([string]$package.engines.node -ne '>=24 <25') { throw 'package.json must declare the tested Node 24 range.' }
-    $shrinkwrapTopVersion = '^(?:\uFEFF)?\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.2"'
-    $shrinkwrapRootVersion = '""\s*:\s*\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.2"'
-    if ([string]$package.version -ne '0.1.2' -or $shrinkwrapText -notmatch $shrinkwrapTopVersion -or $shrinkwrapText -notmatch $shrinkwrapRootVersion) {
-        throw 'Package and shrinkwrap release identities must all be 0.1.2.'
+    $shrinkwrapTopVersion = '^(?:\uFEFF)?\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.3"'
+    $shrinkwrapRootVersion = '""\s*:\s*\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.3"'
+    if ([string]$package.version -ne '0.1.3' -or $shrinkwrapText -notmatch $shrinkwrapTopVersion -or $shrinkwrapText -notmatch $shrinkwrapRootVersion) {
+        throw 'Package and shrinkwrap release identities must all be 0.1.3.'
     }
     foreach ($identity in @(
-        @{ Text = $proxy; Pattern = "name: 'chrome-devtools-persistent-gateway', version: '0\.1\.2'"; Label = 'gateway runtime' },
-        @{ Text = $daemon; Pattern = "name: 'chrome-devtools-persistent-daemon', version: '0\.1\.2'"; Label = 'daemon runtime' },
-        @{ Text = $installer; Pattern = "package_version = '0\.1\.2'"; Label = 'installer state' },
-        @{ Text = (Get-Content -LiteralPath tests\gateway-parent-helper.mjs -Raw); Pattern = "version: '0\.1\.2'"; Label = 'parent helper' },
-        @{ Text = (Get-Content -LiteralPath tests\gateway-smoke.mjs -Raw); Pattern = "version: '0\.1\.2'"; Label = 'gateway test client' }
+        @{ Text = $proxy; Pattern = "name: 'chrome-devtools-persistent-gateway', version: '0\.1\.3'"; Label = 'gateway runtime' },
+        @{ Text = $daemon; Pattern = "name: 'chrome-devtools-persistent-daemon', version: '0\.1\.3'"; Label = 'daemon runtime' },
+        @{ Text = $installer; Pattern = "package_version = '0\.1\.3'"; Label = 'installer state' },
+        @{ Text = (Get-Content -LiteralPath tests\gateway-parent-helper.mjs -Raw); Pattern = "version: '0\.1\.3'"; Label = 'parent helper' },
+        @{ Text = (Get-Content -LiteralPath tests\gateway-smoke.mjs -Raw); Pattern = "version: '0\.1\.3'"; Label = 'gateway test client' }
     )) {
-        Require-Text $identity.Text $identity.Pattern "The $($identity.Label) release identity is not 0.1.2."
+        Require-Text $identity.Text $identity.Pattern "The $($identity.Label) release identity is not 0.1.3."
     }
     foreach ($pin in @{
         '@modelcontextprotocol/sdk' = '1.29.0'; 'chrome-devtools-mcp' = '1.7.0'; zod = '4.4.3'

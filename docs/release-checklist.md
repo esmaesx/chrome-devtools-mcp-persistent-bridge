@@ -24,17 +24,23 @@ Complete every check on Windows before release.
 - [ ] A backend-generation change blocks mutation until fresh `list_pages` and `select_page` complete.
 - [ ] Usage statistics, CrUX, and update checks are disabled in the fixed backend launch.
 - [ ] Native class, modal owner, process start, and absence of web `Document` content are checked again before invocation.
-- [ ] The lease releases only on gateway shutdown or after 10 minutes with an empty queue and no active tool.
+- [ ] The lease releases only on gateway shutdown, after 10 minutes with an empty queue and no active tool, or after a complete authenticated idle-yield handshake from an explicit waiter.
 - [ ] Idle release makes no Chrome call, clears selected-page and session state, and does not reset the recovery counter.
 - [ ] Stdio end, close, and error plus front-transport close and fatal errors start one bounded shutdown path.
 - [ ] The default gateway waits at most 750 ms plus the deterministic test tolerance, then returns authenticated `lease_busy`, `dispatched: false`, and `automatic_retry_allowed: false` without a Chrome dispatch.
 - [ ] Only exact `chrome-devtools` or `chrome-devtools --lease-wait-ms N` is accepted. Canonical ASCII `N` is 750 through 300000. Missing, duplicate, extra, malformed, leading-zero, and out-of-range forms exit 2 with one bounded sanitized usage line before daemon access or MCP Server construction.
 - [ ] Opt-in bounded cooperative waiting continues only for an authenticated owner. It closes every failed candidate server and owner-status socket, holds no lease pipe between attempts, and fails immediately for `held_unknown` or invalid status.
+- [ ] Every acquisition has a new random lease instance ID. Yield and acknowledgement require the exact current gateway ID, lease ID, and token. Stale IDs cannot affect a later lease.
+- [ ] Default gateways send authenticated status only. Only exact `--lease-wait-ms` clients can request yield.
+- [ ] Active, queued, shutting-down, or quiet-grace owners refuse yield. An accepted yield blocks new tool dispatch on old state synchronously.
+- [ ] The complete matching yield response arrives before the pipe becomes bindable. Release occurs only after the matching acknowledgement and response-socket close, including the bounded post-ACK close fallback for a stalled peer. A missing or invalid acknowledgement keeps the lease.
+- [ ] Before ACK commit, MCP cancellation and the explicit `N` deadline stop status, yield, and polling waits and prevent later release. After ACK commit, a separate 1.5 second takeover can extend `N`, ignores acquisition cancellation, and releases the exact new lease before Chrome dispatch when the call was canceled.
 - [ ] A cooperative-wait timeout dispatches zero tools and does not replay, release, kill, or evict an owner.
 - [ ] With an authenticated owner and at least two waiting gateways, MCP initialization and `tools/list` complete within the normal bound without acquiring the lease.
-- [ ] A three-client test proves that both waiters can complete after prior owners close, backend Chrome tool dispatch never overlaps, and each session enforces `list_pages`, `select_page`, then its target tool.
+- [ ] A three-client test proves that both waiters complete through authenticated idle handoff without prior owners closing, backend Chrome tool dispatch never overlaps, and each session enforces `list_pages`, `select_page`, then its target tool.
 - [ ] Documentation calls the option bounded cooperative waiting and states that it is not FIFO and gives no fairness guarantee.
-- [ ] Authenticated lease status is read-only, bypasses the Chrome queue, and returns only the approved owner facts.
+- [ ] Documentation states that the 250 ms quiet grace is only a race cushion, not a multi-call reservation. A yielded old owner must reacquire with fresh `list_pages` and `select_page` calls.
+- [ ] Authenticated lease status is read-only, bypasses the Chrome queue, and returns only the approved owner facts, including the per-acquisition lease instance ID.
 - [ ] `status.ps1` reports daemon health and `free`, `held`, or `held_unknown` lease state separately. It does not restart or stop a process.
 - [ ] An absent daemon produces bounded `daemon_absent` output from gateway startup and `status.ps1`, without a raw pipe error or sensitive data.
 - [ ] Read-only install preflight accepts a free lease and refuses known, legacy, invalid, or potentially reacquirable gateway ownership.

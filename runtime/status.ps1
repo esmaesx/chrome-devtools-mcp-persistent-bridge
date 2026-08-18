@@ -123,6 +123,7 @@ try {
                     pid = $leaseCandidate.pid
                     parent_pid = $leaseCandidate.parent_pid
                     gateway_instance_id = $leaseCandidate.gateway_instance_id
+                    lease_instance_id = $leaseCandidate.lease_instance_id
                     acquired_at_utc = $leaseCandidate.acquired_at_utc
                     last_activity_at_utc = $leaseCandidate.last_activity_at_utc
                     in_flight = $leaseCandidate.in_flight

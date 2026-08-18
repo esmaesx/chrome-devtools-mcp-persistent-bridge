@@ -88,13 +88,14 @@ function isValidHeldLeaseStatus(value) {
   if (!isPlainObject(value)) return false;
   const expectedKeys = [
     'acquired_at_utc', 'gateway_instance_id', 'in_flight', 'last_activity_at_utc',
-    'parent_pid', 'pid', 'queue_depth',
+    'lease_instance_id', 'parent_pid', 'pid', 'queue_depth',
   ];
   const actualKeys = Object.keys(value).sort();
   if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) return false;
   return Number.isSafeInteger(value.pid) && value.pid > 0
     && Number.isSafeInteger(value.parent_pid) && value.parent_pid >= 0
     && typeof value.gateway_instance_id === 'string' && value.gateway_instance_id.length > 0
+    && typeof value.lease_instance_id === 'string' && value.lease_instance_id.length > 0
     && Number.isFinite(Date.parse(value.acquired_at_utc))
     && Number.isFinite(Date.parse(value.last_activity_at_utc))
     && typeof value.in_flight === 'boolean'
@@ -173,7 +174,7 @@ function testBackendEntry() {
 
 async function connectBackend() {
   if (backendClient) return backendClient;
-  const client = new Client({ name: 'chrome-devtools-persistent-daemon', version: '0.1.2' }, { capabilities: {} });
+  const client = new Client({ name: 'chrome-devtools-persistent-daemon', version: '0.1.3' }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [testBackendEntry(), '--autoConnect', '--no-usage-statistics', '--no-performance-crux'],

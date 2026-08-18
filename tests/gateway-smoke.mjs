@@ -140,6 +140,57 @@ function rawLeaseStatus(root, token = 'a'.repeat(64), timeoutMs = 1_000) {
   });
 }
 
+function beginRawLeaseControl(root, request, timeoutMs = 1_000, { allowHalfOpen = false } = {}) {
+  const socket = net.createConnection({ path: leasePipeFor(root), allowHalfOpen });
+  let buffer = '';
+  let settled = false;
+  let resolveResponse;
+  let rejectResponse;
+  const response = new Promise((resolveValue, rejectValue) => {
+    resolveResponse = resolveValue;
+    rejectResponse = rejectValue;
+  });
+  const finish = (callback, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    callback(value);
+  };
+  const timer = setTimeout(() => {
+    socket.destroy();
+    finish(rejectResponse, new Error('Raw lease control request timed out.'));
+  }, timeoutMs);
+  socket.setEncoding('utf8');
+  socket.once('connect', () => socket.write(`${JSON.stringify(request)}\n`));
+  socket.on('data', (chunk) => {
+    buffer += chunk;
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) return;
+    if (buffer.slice(newline + 1).trim().length > 0) return finish(rejectResponse, new Error('Raw lease control response contained extra data.'));
+    try { finish(resolveResponse, JSON.parse(buffer.slice(0, newline))); } catch (cause) { finish(rejectResponse, cause); }
+  });
+  socket.once('close', () => finish(resolveResponse, null));
+  socket.once('error', (cause) => finish(rejectResponse, cause));
+  return { socket, response };
+}
+
+async function leasePipeIsBindable(root) {
+  const candidate = net.createServer();
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      candidate.once('error', rejectListen);
+      candidate.once('listening', resolveListen);
+      candidate.listen(leasePipeFor(root));
+    });
+    return true;
+  } catch (cause) {
+    if (cause.code === 'EADDRINUSE') return false;
+    throw cause;
+  } finally {
+    try { await new Promise((resolveClose) => candidate.close(resolveClose)); } catch { }
+  }
+}
+
 function beginRawDaemonRequest(root, request, timeoutMs = 10_000) {
   let resolveSent;
   let rejectSent;
@@ -289,7 +340,7 @@ async function createFixture(label, overrides = {}) {
     await cp(join(repositoryRoot, 'runtime', file), join(root, 'runtime', file));
   }
   await symlink(nodeModules, join(root, 'node_modules'), 'junction');
-  await writeFile(join(root, 'install-state.json'), JSON.stringify({ install_root: root, daemon_token: 'a'.repeat(64), node_path: process.execPath, package_version: '0.1.2' }), 'utf8');
+  await writeFile(join(root, 'install-state.json'), JSON.stringify({ install_root: root, daemon_token: 'a'.repeat(64), node_path: process.execPath, package_version: '0.1.3' }), 'utf8');
   const env = {
     ...process.env,
     NODE_ENV: 'test',
@@ -298,13 +349,13 @@ async function createFixture(label, overrides = {}) {
     CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS: '250',
     ...overrides,
   };
-  const fixture = { root, env, daemons: [], transports: [], transportByClient: new Map() };
+  const fixture = { root, env, daemons: [], transports: [], transportByClient: new Map(), stderrByClient: new Map() };
   await startDaemon(fixture);
   return fixture;
 }
 
 async function connectGateway(fixture, name, { leaseWaitMs } = {}) {
-  const client = new Client({ name, version: '0.1.2' }, { capabilities: {} });
+  const client = new Client({ name, version: '0.1.3' }, { capabilities: {} });
   const args = [join(fixture.root, 'runtime', 'stdio-proxy.mjs'), 'chrome-devtools'];
   if (leaseWaitMs !== undefined) args.push('--lease-wait-ms', String(leaseWaitMs));
   const transport = new StdioClientTransport({
@@ -315,14 +366,15 @@ async function connectGateway(fixture, name, { leaseWaitMs } = {}) {
     stderr: 'pipe',
   });
   let stderr = '';
-  transport.stderr?.on('data', (chunk) => { stderr += String(chunk); });
   try {
     await client.connect(transport);
   } catch (cause) {
     throw new Error(`Gateway connection failed: ${cause.message}\n${stderr}`);
   }
+  transport.stderr?.on('data', (chunk) => { stderr += String(chunk); });
   fixture.transports.push(transport);
   fixture.transportByClient.set(client, transport);
+  fixture.stderrByClient.set(client, () => stderr);
   return client;
 }
 
@@ -330,6 +382,7 @@ async function closeGateway(fixture, client) {
   const transport = fixture.transportByClient.get(client);
   if (!transport) return;
   fixture.transportByClient.delete(client);
+  fixture.stderrByClient.delete(client);
   const index = fixture.transports.indexOf(transport);
   if (index >= 0) fixture.transports.splice(index, 1);
   await transport.close();
@@ -344,6 +397,7 @@ async function closeFixture(fixture) {
     try { await transport.close(); } catch { }
   }
   fixture.transportByClient.clear();
+  fixture.stderrByClient.clear();
   try { await stopDaemon(fixture); } catch { }
   for (const daemon of fixture.daemons) {
     if (daemon.child.exitCode === null) {
@@ -358,6 +412,10 @@ async function closeFixture(fixture) {
 
 async function call(client, name, args = {}) {
   return client.callTool({ name, arguments: args });
+}
+
+async function callWithOptions(client, name, args, options) {
+  return client.callTool({ name, arguments: args }, undefined, options);
 }
 
 async function normalFlowAndInvalidList() {
@@ -399,7 +457,7 @@ async function taskLease() {
     expect(scriptStatus.daemon?.status === 'running' && scriptStatus.lease?.state === 'held', 'status.ps1 did not separate a running daemon from a held lease.');
     const rawStatus = await rawLeaseStatus(fixture.root);
     const rawKeys = Object.keys(rawStatus ?? {}).sort();
-    const allowedKeys = ['acquired_at_utc', 'gateway_instance_id', 'in_flight', 'last_activity_at_utc', 'parent_pid', 'pid', 'queue_depth'];
+    const allowedKeys = ['acquired_at_utc', 'gateway_instance_id', 'in_flight', 'last_activity_at_utc', 'lease_instance_id', 'parent_pid', 'pid', 'queue_depth'];
     expect(rawKeys.length === allowedKeys.length && rawKeys.every((key, index) => key === allowedKeys[index]), 'The lease pipe exposed data outside the approved owner facts.');
     expect(await rawLeaseStatus(fixture.root, 'b'.repeat(64)) === null, 'The lease pipe answered an unauthenticated status request.');
     const started = Date.now();
@@ -416,16 +474,141 @@ async function taskLease() {
   }
 }
 
+async function authenticatedIdleYieldHandshake() {
+  const events = join(tmpdir(), `chrome-bridge-idle-yield-events-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const fixture = await createFixture('idle-yield-protocol', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '80',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_ACK_MS: '300',
+    FAKE_CHROME_EVENTS_FILE: events,
+  });
+  try {
+    const owner = await connectGateway(fixture, 'gateway-idle-yield-owner');
+    expect(!(await call(owner, 'list_pages')).isError, 'Idle-yield owner could not acquire the lease.');
+    await delay(100);
+    const original = await rawLeaseStatus(fixture.root);
+    expect(typeof original?.lease_instance_id === 'string' && original.lease_instance_id.length > 0, 'Lease status omitted the per-acquisition lease ID.');
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === original.lease_instance_id, 'Authenticated status changed the lease.');
+
+    const invalid = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'b'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    });
+    expect(await invalid.response === null, 'An invalid token received a yield response.');
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === original.lease_instance_id, 'An invalid token yielded the lease.');
+
+    const stale = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: 'stale-lease-instance',
+    });
+    const staleReply = await stale.response;
+    expect(staleReply?.accepted === false && staleReply.reason === 'stale_lease', 'A stale lease ID was not refused.');
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === original.lease_instance_id, 'A stale lease ID yielded the lease.');
+
+    const unacknowledged = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    });
+    const accepted = await unacknowledged.response;
+    const acceptedKeys = Object.keys(accepted ?? {}).sort();
+    const expectedReplyKeys = ['accepted', 'gateway_instance_id', 'lease_instance_id', 'operation', 'reason'];
+    expect(acceptedKeys.length === expectedReplyKeys.length && acceptedKeys.every((key, index) => key === expectedReplyKeys[index]), 'The accepted yield response did not contain one exact bounded schema.');
+    expect(accepted.accepted === true && accepted.gateway_instance_id === original.gateway_instance_id && accepted.lease_instance_id === original.lease_instance_id, 'The yield response did not match both owner IDs.');
+    expect(!(await leasePipeIsBindable(fixture.root)), 'The lease pipe became bindable before the complete matching response was read and acknowledged.');
+    const duringPending = await call(owner, 'list_pages');
+    expectError(duringPending, 'lease_yielding', 'A tool that arrived after yield acceptance was not blocked.');
+    expect(duringPending.structuredContent?.dispatched === false, 'A tool that arrived during a pending yield reported a dispatch.');
+    expect((await eventCount(events, 'list_pages')) === 1, 'A tool arrived during a pending yield and reached Chrome.');
+    const simultaneous = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    });
+    const simultaneousReply = await simultaneous.response;
+    expect(simultaneousReply?.accepted === false && simultaneousReply.reason === 'yield_pending', 'Two simultaneous yield requests created more than one pending handoff.');
+    unacknowledged.socket.destroy();
+    await delay(350);
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === original.lease_instance_id, 'An unacknowledged yield released the lease later.');
+
+    const invalidAcks = [
+      {
+        label: 'wrong-token',
+        value: JSON.stringify({ operation: 'yield_ack', token: 'b'.repeat(64), gateway_instance_id: original.gateway_instance_id, lease_instance_id: original.lease_instance_id }),
+      },
+      {
+        label: 'wrong-ID',
+        value: JSON.stringify({ operation: 'yield_ack', token: 'a'.repeat(64), gateway_instance_id: original.gateway_instance_id, lease_instance_id: 'wrong-lease-instance' }),
+      },
+      { label: 'malformed', value: '{not-json' },
+    ];
+    for (const invalidAck of invalidAcks) {
+      const pendingInvalid = beginRawLeaseControl(fixture.root, {
+        operation: 'yield',
+        token: 'a'.repeat(64),
+        gateway_instance_id: original.gateway_instance_id,
+        lease_instance_id: original.lease_instance_id,
+      });
+      expect((await pendingInvalid.response)?.accepted === true, `The ${invalidAck.label} ACK test did not enter the pending state.`);
+      const invalidClosed = once(pendingInvalid.socket, 'close');
+      pendingInvalid.socket.end(`${invalidAck.value}\n`);
+      await withTimeout(invalidClosed, 1_000, `The ${invalidAck.label} ACK connection did not close.`);
+      expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === original.lease_instance_id, `The ${invalidAck.label} ACK changed the owner lease.`);
+      expect(!(await leasePipeIsBindable(fixture.root)), `The ${invalidAck.label} ACK released the lease.`);
+    }
+
+    const acknowledged = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    });
+    expect((await acknowledged.response)?.accepted === true, 'The matching idle yield was not accepted.');
+    acknowledged.socket.write(`${JSON.stringify({
+      operation: 'yield_ack',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    })}\n`, () => acknowledged.socket.end());
+    await waitForCondition(async () => (await parsedDaemonStatus(fixture.root)).lease?.state === 'free', 2_000, 'The acknowledged idle yield did not release the lease.');
+
+    expect(!(await call(owner, 'list_pages')).isError, 'The prior owner could not reacquire with fresh state.');
+    const reacquired = await rawLeaseStatus(fixture.root);
+    expect(reacquired.gateway_instance_id === original.gateway_instance_id && reacquired.lease_instance_id !== original.lease_instance_id, 'A lease reacquisition did not create a fresh lease instance ID.');
+    const oldLeaseRequest = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    });
+    expect((await oldLeaseRequest.response)?.accepted === false, 'A request from an earlier lease affected a later lease.');
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === reacquired.lease_instance_id, 'A stale request released the later lease.');
+  } finally {
+    await closeFixture(fixture);
+    await rm(events, { force: true });
+  }
+}
+
 async function defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing() {
   const events = join(tmpdir(), `chrome-bridge-default-wait-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
   const fixture = await createFixture('default-wait', {
     CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS: '',
     CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '100',
+    FAKE_CHROME_DELAY_TOOL: 'take_snapshot',
+    FAKE_CHROME_DELAY_MS: '1800',
     FAKE_CHROME_EVENTS_FILE: events,
   });
   try {
     const owner = await connectGateway(fixture, 'gateway-default-wait-owner');
     expect(!(await call(owner, 'list_pages')).isError, 'Default-wait owner did not acquire the lease.');
+    expect(!(await call(owner, 'select_page')).isError, 'Default-wait owner could not select a page.');
 
     const defaultClient = await connectGateway(fixture, 'gateway-default-wait-candidate');
     const defaultStarted = Date.now();
@@ -437,15 +620,239 @@ async function defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing() {
     expect(defaultBusy.structuredContent?.owner_pid === fixtureTransportPid(fixture, owner), 'The default busy result did not identify the owner.');
     expect(defaultBusy.structuredContent?.dispatched === false && defaultBusy.structuredContent?.automatic_retry_allowed === false, 'The default busy result permitted dispatch or automatic retry.');
     expect((await eventCount(events, 'list_pages')) === 1, 'The default lease timeout dispatched a Chrome tool.');
+    const ownerAfterDefault = (await parsedDaemonStatus(fixture.root)).lease;
+    expect(ownerAfterDefault?.pid === fixtureTransportPid(fixture, owner), 'The default status-only client yielded an idle owner.');
 
     const boundedWaiter = await connectGateway(fixture, 'gateway-explicit-timeout-candidate', { leaseWaitMs: 900 });
+    const slow = call(owner, 'take_snapshot');
+    await waitForCondition(async () => (await eventCount(events, 'take_snapshot')) === 1, 2_000, 'The timeout test owner tool did not start.');
     const queuedBusy = await call(boundedWaiter, 'list_pages');
     expectError(queuedBusy, 'lease_busy', 'The bounded queue timeout did not return lease_busy.');
     expect(queuedBusy.structuredContent?.dispatched === false && queuedBusy.structuredContent?.automatic_retry_allowed === false, 'The bounded queue timeout permitted dispatch or automatic retry.');
     expect((await eventCount(events, 'list_pages')) === 1, 'The bounded queue timeout dispatched a Chrome tool.');
+    expect(!(await slow).isError, 'The timeout test owner tool failed.');
+    await delay(250);
+    expect((await parsedDaemonStatus(fixture.root)).lease?.pid === fixtureTransportPid(fixture, owner), 'A timed-out waiter released the owner later.');
+
+    const canceledWaiter = await connectGateway(fixture, 'gateway-explicit-canceled-candidate', { leaseWaitMs: 5_000 });
+    const secondSlow = call(owner, 'take_snapshot');
+    await waitForCondition(async () => (await eventCount(events, 'take_snapshot')) === 2, 2_000, 'The cancellation test owner tool did not start.');
+    const controller = new AbortController();
+    const canceledCall = callWithOptions(canceledWaiter, 'list_pages', {}, { signal: controller.signal, timeout: 5_000 });
+    await delay(125);
+    controller.abort();
+    let canceled = false;
+    try { await canceledCall; } catch (cause) { canceled = cause?.name === 'AbortError' || String(cause?.message).toLowerCase().includes('abort'); }
+    expect(canceled, 'The explicit waiter call did not observe cancellation.');
+    expect(!(await secondSlow).isError, 'The cancellation test owner tool failed.');
+    await delay(250);
+    expect((await parsedDaemonStatus(fixture.root)).lease?.pid === fixtureTransportPid(fixture, owner), 'A canceled waiter released the owner later.');
   } finally {
     await closeFixture(fixture);
     await rm(events, { force: true });
+  }
+}
+
+async function canceledCommittedYieldCompletesBoundedTakeover() {
+  const events = join(tmpdir(), `chrome-bridge-committed-cancel-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const fixture = await createFixture('committed-cancel', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_ACK_MS: '850',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_COMMIT_MS: '1500',
+    FAKE_CHROME_EVENTS_FILE: events,
+  });
+  const sockets = new Set();
+  const scriptedOwner = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.setEncoding('utf8');
+    let buffer = '';
+    let phase = 'request';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      let request;
+      try { request = JSON.parse(line); } catch { socket.destroy(); return; }
+      if (phase === 'request' && request.operation === 'status' && request.token === 'a'.repeat(64)) {
+        socket.end(`${JSON.stringify({
+          pid: process.pid,
+          parent_pid: process.ppid,
+          gateway_instance_id: 'scripted-owner-gateway',
+          lease_instance_id: 'scripted-owner-lease',
+          acquired_at_utc: new Date().toISOString(),
+          last_activity_at_utc: new Date().toISOString(),
+          in_flight: false,
+          queue_depth: 0,
+        })}\n`);
+        return;
+      }
+      if (phase === 'request'
+        && request.operation === 'yield'
+        && request.token === 'a'.repeat(64)
+        && request.gateway_instance_id === 'scripted-owner-gateway'
+        && request.lease_instance_id === 'scripted-owner-lease') {
+        phase = 'ack';
+        setTimeout(() => socket.write(`${JSON.stringify({
+          operation: 'yield',
+          accepted: true,
+          gateway_instance_id: 'scripted-owner-gateway',
+          lease_instance_id: 'scripted-owner-lease',
+          reason: 'accepted',
+        })}\n`), 700);
+        return;
+      }
+      if (phase === 'ack'
+        && request.operation === 'yield_ack'
+        && request.token === 'a'.repeat(64)
+        && request.gateway_instance_id === 'scripted-owner-gateway'
+        && request.lease_instance_id === 'scripted-owner-lease') {
+        phase = 'done';
+        resolveAckReceived();
+        setTimeout(() => {
+          socket.end();
+          scriptedOwner.close(() => resolveOwnerClosed());
+        }, 350);
+        return;
+      }
+      socket.destroy();
+    });
+  });
+  let resolveAckReceived;
+  let resolveOwnerClosed;
+  const ackReceived = new Promise((resolveAck) => { resolveAckReceived = resolveAck; });
+  const ownerClosed = new Promise((resolveClose) => { resolveOwnerClosed = resolveClose; });
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      scriptedOwner.once('error', rejectListen);
+      scriptedOwner.once('listening', resolveListen);
+      scriptedOwner.listen(leasePipeFor(fixture.root));
+    });
+    const waiter = await connectGateway(fixture, 'gateway-committed-cancel-waiter', { leaseWaitMs: 900 });
+    const controller = new AbortController();
+    const started = Date.now();
+    const canceledCall = callWithOptions(waiter, 'list_pages', {}, { signal: controller.signal, timeout: 5_000 });
+    await withTimeout(ackReceived, 1_500, 'The scripted owner did not receive the committed yield ACK.');
+    const ackElapsed = Date.now() - started;
+    expect(ackElapsed >= 600 && ackElapsed < 900, `The ACK did not arrive just before the original 900 ms acquisition deadline: ${ackElapsed} ms.`);
+    controller.abort();
+    let canceled = false;
+    try { await canceledCall; } catch (cause) { canceled = cause?.name === 'AbortError' || String(cause?.message).toLowerCase().includes('abort'); }
+    expect(canceled, 'The MCP caller did not observe cancellation after ACK commit.');
+    await withTimeout(ownerClosed, 2_000, 'The scripted owner did not finish its delayed close.');
+    await waitForCondition(async () => (await parsedDaemonStatus(fixture.root)).lease?.state === 'free', 3_000, 'The canceled committed handoff did not acquire and promptly release the lease.');
+    expect((await eventCount(events, 'list_pages')) === 0, 'The canceled committed handoff dispatched a Chrome tool.');
+
+    const sentinel = await connectGateway(fixture, 'gateway-committed-cancel-sentinel');
+    expect(!(await call(sentinel, 'list_pages')).isError, 'A client could not acquire after the canceled committed handoff.');
+    const sentinelLease = (await parsedDaemonStatus(fixture.root)).lease;
+    await delay(400);
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === sentinelLease.lease_instance_id, 'A delayed canceled handoff released the later sentinel lease.');
+    expect((await eventCount(events, 'list_pages')) === 1, 'The committed cancellation test dispatched an unexpected Chrome call.');
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    if (scriptedOwner.listening) await new Promise((resolveClose) => scriptedOwner.close(resolveClose));
+    await closeFixture(fixture);
+    await rm(events, { force: true });
+  }
+}
+
+async function canceledNewBindReleasesOnlyThatLease() {
+  const events = join(tmpdir(), `chrome-bridge-bind-cancel-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const fixture = await createFixture('bind-cancel', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_BEFORE_DISPATCH_DELAY_MS: '500',
+    FAKE_CHROME_EVENTS_FILE: events,
+  });
+  try {
+    const client = await connectGateway(fixture, 'gateway-bind-cancel-client');
+    const controller = new AbortController();
+    const canceledCall = callWithOptions(client, 'list_pages', {}, { signal: controller.signal, timeout: 5_000 });
+    await waitForCondition(async () => (await parsedDaemonStatus(fixture.root)).lease?.pid === fixtureTransportPid(fixture, client), 1_500, 'The cancellation test did not observe the new lease before dispatch.');
+    controller.abort();
+    let canceled = false;
+    try { await canceledCall; } catch (cause) { canceled = cause?.name === 'AbortError' || String(cause?.message).toLowerCase().includes('abort'); }
+    expect(canceled, 'The call canceled after lease bind did not reject at the MCP caller.');
+    await waitForCondition(async () => (await parsedDaemonStatus(fixture.root)).lease?.state === 'free', 1_500, 'A canceled new bind retained its unused lease.');
+    expect((await eventCount(events, 'list_pages')) === 0, 'A call canceled after bind reached Chrome.');
+
+    expect(!(await call(client, 'list_pages')).isError, 'The client could not acquire after its canceled new bind.');
+    const existingLease = (await parsedDaemonStatus(fixture.root)).lease;
+    const existingController = new AbortController();
+    const canceledExistingCall = callWithOptions(client, 'list_pages', {}, { signal: existingController.signal, timeout: 5_000 });
+    await delay(100);
+    existingController.abort();
+    try { await canceledExistingCall; } catch { }
+    await delay(550);
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === existingLease.lease_instance_id, 'Cancellation released a pre-existing lease held by the same gateway.');
+    expect((await eventCount(events, 'list_pages')) === 1, 'The pre-existing-lease cancellation dispatched a Chrome tool.');
+  } finally {
+    await closeFixture(fixture);
+    await rm(events, { force: true });
+  }
+}
+
+async function ownerShutdownDuringPendingYieldReleasesNormally() {
+  const fixture = await createFixture('pending-yield-shutdown', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '60',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_ACK_MS: '800',
+  });
+  try {
+    const owner = await connectGateway(fixture, 'gateway-pending-shutdown-owner');
+    expect(!(await call(owner, 'list_pages')).isError, 'Pending-shutdown owner did not acquire the lease.');
+    await delay(90);
+    const original = await rawLeaseStatus(fixture.root);
+    const pending = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    });
+    expect((await pending.response)?.accepted === true, 'The shutdown test did not enter a pending yield.');
+    const pendingClosed = once(pending.socket, 'close');
+    await closeGateway(fixture, owner);
+    await withTimeout(pendingClosed, 2_000, 'Owner shutdown did not close the pending yield socket.');
+    await waitForCondition(() => leasePipeIsBindable(fixture.root), 2_000, 'Owner shutdown did not release the pending lease through normal shutdown.');
+
+    const next = await connectGateway(fixture, 'gateway-after-pending-shutdown');
+    expect(!(await call(next, 'list_pages')).isError, 'A new gateway could not acquire after pending-yield owner shutdown.');
+  } finally {
+    await closeFixture(fixture);
+  }
+}
+
+async function committedAckStalledPeerStillReleases() {
+  const fixture = await createFixture('stalled-yield-peer', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '60',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_ACK_MS: '800',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_OWNER_CLOSE_MS: '250',
+  });
+  try {
+    const owner = await connectGateway(fixture, 'gateway-stalled-yield-owner');
+    expect(!(await call(owner, 'list_pages')).isError, 'Stalled-peer owner did not acquire the lease.');
+    await delay(90);
+    const original = await rawLeaseStatus(fixture.root);
+    const stalled = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    }, 1_000, { allowHalfOpen: true });
+    expect((await stalled.response)?.accepted === true, 'The stalled-peer test did not receive an accepted yield.');
+    stalled.socket.write(`${JSON.stringify({
+      operation: 'yield_ack',
+      token: 'a'.repeat(64),
+      gateway_instance_id: original.gateway_instance_id,
+      lease_instance_id: original.lease_instance_id,
+    })}\n`);
+    await waitForCondition(async () => (await parsedDaemonStatus(fixture.root)).lease?.state === 'free', 1_500, 'A valid committed ACK with a stalled peer did not release the lease.');
+    stalled.socket.destroy();
+  } finally {
+    await closeFixture(fixture);
   }
 }
 
@@ -460,12 +867,14 @@ async function cooperativeWaitersKeepMcpControlResponsive() {
     FAKE_CHROME_INTERVALS_FILE: intervals,
   });
   const clients = [];
+  let flows = [];
   try {
     const owner = await connectGateway(fixture, 'gateway-cooperative-owner');
     clients.push(owner);
     const completeSequence = async (client, label) => {
       expectError(await call(client, 'take_snapshot'), 'blocked_discovery_required', `${label} did not require list_pages first.`);
-      expect(!(await call(client, 'list_pages')).isError, `${label} list_pages failed.`);
+      const listed = await call(client, 'list_pages');
+      expect(!listed.isError, `${label} list_pages failed: ${textOf(listed)} stderr=${fixture.stderrByClient.get(client)?.() ?? ''}`);
       expectError(await call(client, 'take_snapshot'), 'blocked_selection_required', `${label} did not require select_page before its target tool.`);
       expect(!(await call(client, 'select_page')).isError, `${label} select_page failed.`);
       expect(!(await call(client, 'take_snapshot')).isError, `${label} target tool failed.`);
@@ -482,26 +891,24 @@ async function cooperativeWaitersKeepMcpControlResponsive() {
     expect(Date.now() - initializeStarted <= 2_500, 'Cooperative waiter initialization waited for the browser lease.');
 
     const settled = [false, false];
-    const flows = waiters.map((client, index) => completeSequence(client, `waiter-${index + 1}`).finally(() => { settled[index] = true; }));
+    flows = waiters.map((client, index) => completeSequence(client, `waiter-${index + 1}`).finally(() => { settled[index] = true; }));
     await delay(150);
-    expect(settled.every((value) => value === false), 'A waiter completed while the authenticated owner still held the lease.');
-    expect((await eventCount(events, 'list_pages')) === 1, 'A cooperative waiter dispatched list_pages while the owner held the lease.');
+    const interimLease = (await parsedDaemonStatus(fixture.root)).lease;
+    if (interimLease?.pid === fixtureTransportPid(fixture, owner)) {
+      expect(settled.every((value) => value === false), 'A waiter completed while the authenticated owner still held the lease.');
+      expect((await eventCount(events, 'list_pages')) === 1, 'A cooperative waiter dispatched list_pages while the owner held the lease.');
+    }
 
     const toolsStarted = Date.now();
     const toolLists = await withTimeout(Promise.all(waiters.map((client) => client.listTools())), 1_500, 'tools/list was blocked behind cooperative lease waiting.');
     expect(Date.now() - toolsStarted <= 1_500, 'tools/list exceeded its normal bound during cooperative lease waiting.');
     expect(toolLists.every((result) => result.tools.length === 30), 'A cooperative waiter received an incomplete tool manifest.');
 
-    await closeGateway(fixture, owner);
-    clients.splice(clients.indexOf(owner), 1);
-    const firstLabel = await withTimeout(Promise.race(flows), 6_000, 'No cooperative waiter acquired the released lease.');
+    const firstLabel = await withTimeout(Promise.race(flows), 15_000, 'No cooperative waiter completed within its 10-second acquisition bound.');
     const firstIndex = firstLabel === 'waiter-1' ? 0 : 1;
-    await closeGateway(fixture, waiters[firstIndex]);
-    clients.splice(clients.indexOf(waiters[firstIndex]), 1);
     const secondIndex = firstIndex === 0 ? 1 : 0;
-    expect(await withTimeout(flows[secondIndex], 6_000, 'The second cooperative waiter did not acquire after the prior waiter closed.') === `waiter-${secondIndex + 1}`, 'The second waiter returned the wrong completion identity.');
-    await closeGateway(fixture, waiters[secondIndex]);
-    clients.splice(clients.indexOf(waiters[secondIndex]), 1);
+    expect((await parsedDaemonStatus(fixture.root)).lease?.pid !== fixtureTransportPid(fixture, owner), 'The first idle waiter did not yield the live owner.');
+    expect(await withTimeout(flows[secondIndex], 15_000, 'The second cooperative waiter did not complete within its 10-second acquisition bound.') === `waiter-${secondIndex + 1}`, 'The second waiter returned the wrong completion identity.');
 
     const dispatched = await readJsonLines(events);
     const expectedOrder = ['list_pages', 'select_page', 'take_snapshot', 'list_pages', 'select_page', 'take_snapshot', 'list_pages', 'select_page', 'take_snapshot'];
@@ -510,10 +917,71 @@ async function cooperativeWaitersKeepMcpControlResponsive() {
     expect(timing.length === expectedOrder.length * 2, 'The fake backend did not record a complete dispatch interval for each tool.');
     expect(timing.every((entry) => (entry.phase === 'start' && entry.active_calls === 1) || (entry.phase === 'end' && entry.active_calls === 0)), 'Fake backend Chrome tool dispatch overlapped between gateways.');
   } finally {
+    const settledFlows = Promise.allSettled(flows);
     for (const client of clients) await closeGateway(fixture, client);
+    await settledFlows;
     await closeFixture(fixture);
     await rm(events, { force: true });
     await rm(intervals, { force: true });
+  }
+}
+
+async function yieldGraceProtectsPageFlowGaps() {
+  const events = join(tmpdir(), `chrome-bridge-yield-grace-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const fixture = await createFixture('yield-grace', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '250',
+    FAKE_CHROME_EVENTS_FILE: events,
+  });
+  try {
+    const owner = await connectGateway(fixture, 'gateway-yield-grace-owner');
+    const waiter = await connectGateway(fixture, 'gateway-yield-grace-waiter', { leaseWaitMs: 5_000 });
+    expect(!(await call(owner, 'list_pages')).isError, 'Yield-grace owner list_pages failed.');
+    const waiterStarted = Date.now();
+    const waitingList = call(waiter, 'list_pages');
+    await delay(75);
+    expect(!(await call(owner, 'select_page')).isError, 'The quiet grace did not protect the list_pages to select_page gap.');
+    await delay(75);
+    expect(!(await call(owner, 'take_snapshot')).isError, 'The quiet grace did not protect the select_page to target gap.');
+    const beforeYield = await readJsonLines(events);
+    expect(beforeYield.length === 3 && beforeYield.map((entry) => entry.name).join(',') === 'list_pages,select_page,take_snapshot', 'A waiter entered during the protected page-flow gaps.');
+    expect(!(await withTimeout(waitingList, 3_000, 'The explicit waiter did not acquire soon after the owner became idle.')).isError, 'The explicit waiter list_pages failed after idle yield.');
+    expect(Date.now() - waiterStarted < 1_500, 'The explicit idle waiter did not acquire quickly.');
+    const afterYield = await readJsonLines(events);
+    expect(afterYield.length === 4 && afterYield[3].name === 'list_pages', 'The idle waiter did not dispatch exactly after the owner flow.');
+  } finally {
+    await closeFixture(fixture);
+    await rm(events, { force: true });
+  }
+}
+
+async function yieldAfterGraceRequiresOldOwnerRediscovery() {
+  const events = join(tmpdir(), `chrome-bridge-yield-rediscovery-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+  const fixture = await createFixture('yield-rediscovery', {
+    CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000',
+    CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '80',
+    FAKE_CHROME_EVENTS_FILE: events,
+  });
+  try {
+    const owner = await connectGateway(fixture, 'gateway-yield-rediscovery-owner');
+    const waiter = await connectGateway(fixture, 'gateway-yield-rediscovery-waiter', { leaseWaitMs: 5_000 });
+    expect(!(await call(owner, 'list_pages')).isError, 'Old-owner recovery list_pages failed.');
+    expect(!(await call(owner, 'select_page')).isError, 'Old-owner recovery select_page failed.');
+    await delay(120);
+    expect(!(await call(waiter, 'list_pages')).isError, 'The explicit waiter did not yield the owner after the quiet grace.');
+    expectError(await call(owner, 'take_snapshot'), 'blocked_discovery_required', 'The yielded owner retained selected-page state.');
+    expect((await eventCount(events, 'take_snapshot')) === 0, 'The yielded owner dispatched its old target call.');
+
+    await closeGateway(fixture, waiter);
+    expect(!(await call(owner, 'list_pages')).isError, 'The yielded owner could not reacquire with fresh list_pages.');
+    expect(!(await call(owner, 'select_page')).isError, 'The yielded owner could not make a fresh page selection.');
+    expect(!(await call(owner, 'take_snapshot')).isError, 'The yielded owner could not continue after fresh discovery and selection.');
+    const dispatched = await readJsonLines(events);
+    const expected = ['list_pages', 'select_page', 'list_pages', 'list_pages', 'select_page', 'take_snapshot'];
+    expect(dispatched.length === expected.length && dispatched.every((entry, index) => entry.name === expected[index]), 'The yielded owner recovery sequence dispatched unexpected Chrome calls.');
+  } finally {
+    await closeFixture(fixture);
+    await rm(events, { force: true });
   }
 }
 
@@ -769,6 +1237,15 @@ async function idleTimerDoesNotReleaseActiveOrQueuedTools() {
     await delay(180);
     const held = await parsedDaemonStatus(fixture.root);
     expect(held.lease?.state === 'held' && held.lease.in_flight === true, 'Idle timer released an active tool.');
+    const busyYield = beginRawLeaseControl(fixture.root, {
+      operation: 'yield',
+      token: 'a'.repeat(64),
+      gateway_instance_id: held.lease.gateway_instance_id,
+      lease_instance_id: held.lease.lease_instance_id,
+    });
+    const busyYieldReply = await busyYield.response;
+    expect(busyYieldReply?.accepted === false && busyYieldReply.reason === 'owner_busy', 'An active or queued owner accepted a yield request.');
+    expect((await parsedDaemonStatus(fixture.root)).lease?.lease_instance_id === held.lease.lease_instance_id, 'A busy-owner yield request changed the lease.');
     expectError(await call(second, 'list_pages'), 'lease_busy', 'Second gateway entered while a tool was active.');
     expect(!(await slow).isError, 'Slow tool failed.');
     expect(!(await queued).isError, 'Queued tool failed.');
@@ -1065,14 +1542,44 @@ async function backendGenerationAndDaemonInstanceReset() {
   }
 }
 
+if (process.env.CHROME_DEVTOOLS_MCP_TEST_FOCUS === 'cooperative-yield') {
+  await cooperativeWaitersKeepMcpControlResponsive();
+  process.stdout.write('Focused cooperative-yield test passed.\n');
+  process.exit(0);
+}
+
+if (process.env.CHROME_DEVTOOLS_MCP_TEST_FOCUS === 'yield-races') {
+  await authenticatedIdleYieldHandshake();
+  await canceledCommittedYieldCompletesBoundedTakeover();
+  await canceledNewBindReleasesOnlyThatLease();
+  await ownerShutdownDuringPendingYieldReleasesNormally();
+  await committedAckStalledPeerStillReleases();
+  await yieldAfterGraceRequiresOldOwnerRediscovery();
+  process.stdout.write('Focused yield-races tests passed.\n');
+  process.exit(0);
+}
+
+if (process.env.CHROME_DEVTOOLS_MCP_TEST_FOCUS === 'default-wait') {
+  await defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing();
+  process.stdout.write('Focused default-wait test passed.\n');
+  process.exit(0);
+}
+
 await normalFlowAndInvalidList();
 await transientStatusPipeFailureIsRetried();
 await statusScriptStateFailures();
 await absentDaemonHasSanitizedCause();
 await installPreflightMatrix();
 await taskLease();
+await authenticatedIdleYieldHandshake();
 await defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing();
+await canceledCommittedYieldCompletesBoundedTakeover();
+await canceledNewBindReleasesOnlyThatLease();
+await ownerShutdownDuringPendingYieldReleasesNormally();
+await committedAckStalledPeerStillReleases();
 await cooperativeWaitersKeepMcpControlResponsive();
+await yieldGraceProtectsPageFlowGaps();
+await yieldAfterGraceRequiresOldOwnerRediscovery();
 await stdinCloseAndShortSessionsReleaseLease();
 await idleReleaseRequiresFreshDiscoveryAndSelection();
 await idleTimerDoesNotReleaseActiveOrQueuedTools();

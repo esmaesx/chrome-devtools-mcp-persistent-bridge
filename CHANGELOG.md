@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 - 2026-08-17
+
+- Let only an explicit `--lease-wait-ms` client request an authenticated yield from an idle lease owner. The managed default gateway remains status-only and fail-fast.
+- Add a random `lease_instance_id` for every acquisition and bind yield and acknowledgement messages to both the gateway and lease instance IDs.
+- Accept a yield only with the installed token, an exact current lease, no active or queued tool, no shutdown, and a monotonic quiet grace after the last tool activity.
+- Block new owner tool dispatch as soon as a yield is accepted. Release only after the waiter receives the complete matching response and sends the matching acknowledgement. A missing acknowledgement keeps the owner lease.
+- Propagate MCP cancellation into bounded acquisition waits. Before acknowledgement commit, cancellation prevents a later owner release. After commit, use a separate 1.5 second bounded non-cancelable takeover, which can extend explicit `N` by that small bound, and immediately release the exact new lease without Chrome dispatch when the MCP call was canceled.
+- Add a bounded owner-side close fallback so a valid committed acknowledgement releases normally even when the peer stalls after ACK.
+- Release an exact newly bound lease when its call is canceled before daemon dispatch, but keep a pre-existing lease held by the same gateway.
+- Define the 250 ms quiet grace as a race cushion, not a multi-call session reservation. A yield after the grace resets old-owner page state and requires fresh `list_pages` and `select_page` calls after reacquisition.
+- Keep `held_unknown` fail-fast, make stale requests unable to affect a later lease, and add no kill, eviction, replay, or active-owner release path.
+- Add isolated Windows named-pipe tests for exact response ordering, token, ID, and acknowledgement binding, one pending handoff, shutdown during a pending yield, cancellation before dispatch and after acknowledgement commit, old-owner rediscovery, quick idle handoff, default status-only behavior, and three-client non-overlap.
+
 ## 0.1.2 - 2026-08-17
 
 - Add exact CLI opt-in `chrome-devtools --lease-wait-ms N` for bounded cooperative lease waiting from 750 through 300000 ms.
