@@ -1,6 +1,6 @@
 #!/usr/bin/env node
+import { prepareEndpoints } from '../runtime/local-endpoints.mjs';
 
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import net from 'node:net';
 import { join, resolve } from 'node:path';
@@ -74,7 +74,6 @@ if (process.argv.length !== 3 || process.argv[2] !== '--from-environment' || typ
 }
 
 const installRoot = resolve(process.env.DEV_NEWB_BRIDGE_PREFLIGHT_ROOT);
-const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
-const leasePipe = `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
+const { lease: leasePipe } = await prepareEndpoints(installRoot);
 const result = await probeLease(leasePipe, await readToken(installRoot));
 process.stdout.write(`${JSON.stringify(result)}\n`);

@@ -89,7 +89,7 @@ try {
         "pageState === 'need_list'",
         "pageState === 'need_select'",
         'await acquireTaskLease\(signal\)',
-        'sahar-tacit-chrome-control-',
+        'prepareEndpoints\(installRoot\)',
         'candidate\.listen\(leasePipe\)',
         'serveLeaseControl',
         'timingSafeEqual',
@@ -137,7 +137,7 @@ try {
     }
 
     foreach ($requiredPattern in @(
-        'sahar-tacit-chrome-daemon-', 'timingSafeEqual', 'daemon_instance_id', 'expectedInstanceId',
+        'prepareEndpoints\(installRoot\)', 'timingSafeEqual', 'daemon_instance_id', 'expectedInstanceId',
         'expectedGeneration', 'maxTotalTimeout: timeoutFor\(name\)', 'CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS',
         '--no-usage-statistics', '--no-performance-crux', 'dispatched: true', 'stale_backend_generation',
         'probeLeaseStatus', '--lease-status', 'sanitizedDaemonFailure', 'daemon_absent',
@@ -242,7 +242,7 @@ try {
     $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
     $shrinkwrapText = Get-Content -LiteralPath npm-shrinkwrap.json -Raw
     if ($package.os -notcontains 'win32' -or $package.cpu -notcontains 'x64') { throw 'package.json must declare the tested Windows x64 scope.' }
-    if ([string]$package.engines.node -ne '>=24 <25') { throw 'package.json must declare the tested Node 24 range.' }
+    if ([string]$package.engines.node -ne '>=24 <27') { throw 'package.json must declare the supported Node 24 through 26 range.' }
     $shrinkwrapTopVersion = '^(?:\uFEFF)?\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.3"'
     $shrinkwrapRootVersion = '""\s*:\s*\{\s*"name"\s*:\s*"chrome-devtools-mcp-persistent-bridge"\s*,\s*"version"\s*:\s*"0\.1\.3"'
     if ([string]$package.version -ne '0.1.3' -or $shrinkwrapText -notmatch $shrinkwrapTopVersion -or $shrinkwrapText -notmatch $shrinkwrapRootVersion) {

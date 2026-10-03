@@ -336,7 +336,7 @@ async function stopDaemon(fixture) {
 async function createFixture(label, overrides = {}) {
   const root = await mkdtemp(join(tmpdir(), `chrome-bridge-${label}-`));
   await mkdir(join(root, 'runtime'), { recursive: true });
-  for (const file of ['daemon.mjs', 'stdio-proxy.mjs', 'allow-remote-debugging.ps1', 'status.ps1']) {
+  for (const file of ['daemon.mjs', 'stdio-proxy.mjs', 'allow-remote-debugging.ps1', 'status.ps1', 'local-endpoints.mjs']) {
     await cp(join(repositoryRoot, 'runtime', file), join(root, 'runtime', file));
   }
   await symlink(nodeModules, join(root, 'node_modules'), 'junction');

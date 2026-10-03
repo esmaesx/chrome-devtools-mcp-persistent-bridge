@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { prepareEndpoints, validatePrivateState } from './local-endpoints.mjs';
 
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -27,9 +28,7 @@ const statusProbeRetryDelayMs = 50;
 
 const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
-const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
-const pipe = `\\\\.\\pipe\\sahar-tacit-chrome-daemon-${rootHash}`;
-const leasePipe = `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
+const { daemon: pipe, lease: leasePipe } = await prepareEndpoints(installRoot);
 const productionBackendEntry = join(installRoot, 'node_modules', 'chrome-devtools-mcp', 'build', 'src', 'bin', 'chrome-devtools-mcp.js');
 
 function isPlainObject(value) {
@@ -50,6 +49,7 @@ function error(status, detail, extra = {}) {
 }
 
 async function readState() {
+  await validatePrivateState(statePath);
   let state;
   try {
     state = JSON.parse(await readFile(statePath, 'utf8'));

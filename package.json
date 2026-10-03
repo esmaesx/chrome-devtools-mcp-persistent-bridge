@@ -2,7 +2,7 @@
   "name": "chrome-devtools-mcp-persistent-bridge",
   "version": "0.1.3",
   "private": true,
-  "description": "A Windows-only persistent Chrome DevTools MCP bridge with fail-closed permission recovery for Codex.",
+  "description": "Persistent Chrome DevTools MCP bridge for Windows and macOS with authenticated local transport.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,18 +17,22 @@
     "windows"
   ],
   "os": [
-    "win32"
+    "win32",
+    "darwin"
   ],
   "cpu": [
-    "x64"
+    "x64",
+    "arm64"
   ],
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=24 <27"
   },
   "packageManager": "npm@11.9.0",
   "scripts": {
     "test": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests/run.ps1",
-    "doctor": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1"
+    "doctor": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1",
+    "test:macos": "node tests/proxy-args.mjs && node --test tests/macos-smoke.mjs",
+    "setup:macos": "node scripts/setup-macos.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

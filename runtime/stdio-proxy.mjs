@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { prepareEndpoints, validatePrivateState } from './local-endpoints.mjs';
 
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -46,9 +47,7 @@ const readOnlyTools = new Set([
 const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
 const recoveryScript = fileURLToPath(new URL('./allow-remote-debugging.ps1', import.meta.url));
-const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
-const daemonPipe = `\\\\.\\pipe\\sahar-tacit-chrome-daemon-${rootHash}`;
-const leasePipe = `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
+const { daemon: daemonPipe, lease: leasePipe } = await prepareEndpoints(installRoot);
 const powerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const gatewayInstanceId = randomUUID();
 const defaultLeaseWaitMs = process.env.NODE_ENV === 'test' && /^\d{1,4}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS ?? '')
@@ -167,7 +166,7 @@ function errorResult(status, detail, extra = {}) {
 
 async function readDaemonToken() {
   let parsed;
-  try { parsed = JSON.parse(await readFile(statePath, 'utf8')); } catch { throw new Error('The authenticated daemon install state is unavailable.'); }
+  try { await validatePrivateState(statePath); parsed = JSON.parse(await readFile(statePath, 'utf8')); } catch { throw new Error('The authenticated daemon install state is unavailable.'); }
   if (!isPlainObject(parsed) || typeof parsed.daemon_token !== 'string' || parsed.daemon_token.length < 32) throw new Error('The authenticated daemon token is missing from install state.');
   if (typeof parsed.install_root === 'string' && resolve(parsed.install_root).toLowerCase() !== installRoot.toLowerCase()) throw new Error('The daemon install state does not belong to this install root.');
   daemonToken = parsed.daemon_token;
@@ -853,6 +852,7 @@ async function invokeChromeTool(name, args, signal) {
 }
 
 async function invokeRecovery(args, signal) {
+  if (process.platform !== 'win32') return errorResult('manual_permission_required', 'Approve the Chrome remote-debugging prompt yourself, then start a new gateway session. No browser setting was changed.', { mutated: false });
   throwIfAcquireStopped(signal);
   if (!hasNoArguments(args)) return errorResult('blocked_arguments', 'The recovery action accepts no arguments.', { mutated: false });
   if (!recoveryEligible || recoveryConsumed) return errorResult('blocked_not_eligible', 'Recovery is available one time only after this task’s first dispatched list_pages call fails.', { mutated: false });

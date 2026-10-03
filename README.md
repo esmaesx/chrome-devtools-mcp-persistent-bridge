@@ -1,6 +1,6 @@
 # Chrome DevTools MCP Persistent Bridge
 
-A Windows-only package that keeps one pinned Chrome DevTools MCP backend alive for Codex tasks. Codex connects through stdio. The package opens no HTTP, TCP, UDP, or WebSocket control endpoint.
+A Windows and macOS package that keeps one pinned Chrome DevTools MCP backend alive for Codex tasks. Codex connects through stdio. The package opens no HTTP, TCP, UDP, or WebSocket control endpoint.
 
 > [!WARNING]
 > This is not a browser sandbox. The allowed DevTools tools can read or change all exposed Chrome tabs. Use a separate Chrome profile without sensitive accounts, payment data, password-manager access, or unrelated sessions.
@@ -28,7 +28,11 @@ This package implements the goal in [ChromeDevTools/chrome-devtools-mcp issue #8
 | Startup | Normal interactive user, limited run level, fixed paths, one scheduled-task instance | The watchdog must not run elevated or resolve an attacker-controlled executable. |
 | Configuration | Owned blocks, backups, compare-before-write checks, and rollback on detected install failure | Whole-file replacement can destroy unrelated user configuration. |
 
-## Requirements
+## macOS
+
+See [macOS setup and verification](docs/macos.md) for the Node-based setup, Unix socket transport, manual Chrome permission step, and Bulk Files commands. Windows installation and automatic dialog recovery below are Windows-specific.
+
+## Windows requirements
 
 - Windows 10 or later on x64.
 - Windows PowerShell 5.1.
@@ -36,7 +40,7 @@ This package implements the goal in [ChromeDevTools/chrome-devtools-mcp issue #8
 - Official Google Chrome with a valid Google signature.
 - Codex with local stdio MCP support.
 
-## Install
+## Windows installation
 
 Clone this repository, review the scripts, and run:
 

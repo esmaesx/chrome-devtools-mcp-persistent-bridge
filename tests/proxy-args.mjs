@@ -33,6 +33,7 @@ const root = await mkdtemp(join(tmpdir(), 'chrome-bridge-proxy-args-'));
 try {
   await mkdir(join(root, 'runtime'), { recursive: true });
   await cp(join(repositoryRoot, 'runtime', 'stdio-proxy.mjs'), join(root, 'runtime', 'stdio-proxy.mjs'));
+  await cp(join(repositoryRoot, 'runtime', 'local-endpoints.mjs'), join(root, 'runtime', 'local-endpoints.mjs'));
   await symlink(join(repositoryRoot, 'node_modules'), join(root, 'node_modules'), 'junction');
   const proxy = join(root, 'runtime', 'stdio-proxy.mjs');
 
