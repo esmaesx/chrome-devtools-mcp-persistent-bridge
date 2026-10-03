@@ -47,8 +47,8 @@ const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
 const recoveryScript = fileURLToPath(new URL('./allow-remote-debugging.ps1', import.meta.url));
 const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
-const daemonPipe = `\\\\.\\pipe\\dev-newb-chrome-daemon-${rootHash}`;
-const leasePipe = `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
+const daemonPipe = `\\\\.\\pipe\\sahar-tacit-chrome-daemon-${rootHash}`;
+const leasePipe = `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
 const powerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const gatewayInstanceId = randomUUID();
 const defaultLeaseWaitMs = process.env.NODE_ENV === 'test' && /^\d{1,4}$/.test(process.env.CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS ?? '')

@@ -28,8 +28,8 @@ const statusProbeRetryDelayMs = 50;
 const installRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const statePath = join(installRoot, 'install-state.json');
 const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
-const pipe = `\\\\.\\pipe\\dev-newb-chrome-daemon-${rootHash}`;
-const leasePipe = `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
+const pipe = `\\\\.\\pipe\\sahar-tacit-chrome-daemon-${rootHash}`;
+const leasePipe = `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
 const productionBackendEntry = join(installRoot, 'node_modules', 'chrome-devtools-mcp', 'build', 'src', 'bin', 'chrome-devtools-mcp.js');
 
 function isPlainObject(value) {

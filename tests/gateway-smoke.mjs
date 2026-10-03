@@ -34,12 +34,12 @@ function expectError(result, status, message) {
 
 function leasePipeFor(root) {
   const rootHash = createHash('sha256').update(resolve(root).toLowerCase()).digest('hex').slice(0, 24);
-  return `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
+  return `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
 }
 
 function daemonPipeFor(root) {
   const rootHash = createHash('sha256').update(resolve(root).toLowerCase()).digest('hex').slice(0, 24);
-  return `\\\\.\\pipe\\dev-newb-chrome-daemon-${rootHash}`;
+  return `\\\\.\\pipe\\sahar-tacit-chrome-daemon-${rootHash}`;
 }
 
 function processIsLive(pid) {
@@ -1030,7 +1030,7 @@ async function absentDaemonHasSanitizedCause() {
     expect(statusResult.exitCode === 3, `Absent-daemon status exited with ${statusResult.exitCode}.`);
     expect(status.daemon?.ok === false && status.daemon.status === 'absent' && status.daemon.cause === 'daemon_absent', 'status.ps1 did not preserve the daemon_absent cause.');
     const statusText = textOf(status);
-    expect(!statusText.includes('dev-newb-chrome-daemon-') && !statusText.includes('a'.repeat(64)), 'Absent daemon status leaked a pipe name or token.');
+    expect(!statusText.includes('sahar-tacit-chrome-daemon-') && !statusText.includes('a'.repeat(64)), 'Absent daemon status leaked a pipe name or token.');
 
     gateway = spawn(process.execPath, [join(fixture.root, 'runtime', 'stdio-proxy.mjs'), 'chrome-devtools'], {
       cwd: fixture.root,
@@ -1046,7 +1046,7 @@ async function absentDaemonHasSanitizedCause() {
     expect(lines.length === 1, 'Absent-daemon gateway emitted more than one diagnostic line.');
     const failure = JSON.parse(lines[0]);
     expect(failure.status === 'startup_failed' && failure.cause === 'daemon_absent', 'Gateway startup did not expose daemon_absent.');
-    expect(!stderr.includes(fixture.root) && !stderr.includes('dev-newb-chrome-daemon-') && !stderr.includes('a'.repeat(64)), 'Gateway startup leaked a path, pipe name, or token.');
+    expect(!stderr.includes(fixture.root) && !stderr.includes('sahar-tacit-chrome-daemon-') && !stderr.includes('a'.repeat(64)), 'Gateway startup leaked a path, pipe name, or token.');
   } finally {
     if (gateway?.exitCode === null) gateway.kill('SIGKILL');
     await closeFixture(fixture);

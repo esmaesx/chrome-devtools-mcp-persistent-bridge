@@ -75,6 +75,6 @@ if (process.argv.length !== 3 || process.argv[2] !== '--from-environment' || typ
 
 const installRoot = resolve(process.env.DEV_NEWB_BRIDGE_PREFLIGHT_ROOT);
 const rootHash = createHash('sha256').update(installRoot.toLowerCase()).digest('hex').slice(0, 24);
-const leasePipe = `\\\\.\\pipe\\dev-newb-chrome-control-${rootHash}`;
+const leasePipe = `\\\\.\\pipe\\sahar-tacit-chrome-control-${rootHash}`;
 const result = await probeLease(leasePipe, await readToken(installRoot));
 process.stdout.write(`${JSON.stringify(result)}\n`);

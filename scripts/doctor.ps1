@@ -90,7 +90,7 @@ if ((Test-Path -LiteralPath $nodePath -PathType Leaf) -and (Test-Path -LiteralPa
 }
 $daemonRunning = $daemonStatusExit -eq 0 -and $null -ne $daemonStatus -and [string]$daemonStatus.status -eq 'running'
 Add-Check 'daemon-status' $daemonRunning $daemonStatusText
-$pipeValid = $daemonRunning -and [string]$daemonStatus.pipe -like '\\.\pipe\dev-newb-chrome-daemon-*'
+$pipeValid = $daemonRunning -and [string]$daemonStatus.pipe -like '\\.\pipe\sahar-tacit-chrome-daemon-*'
 Add-Check 'daemon-local-pipe' $pipeValid $(if ($daemonStatus) { [string]$daemonStatus.pipe } else { 'named pipe not reported' })
 $daemonProcess = if ($daemonRunning) { Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$daemonStatus.pid)" -ErrorAction SilentlyContinue } else { $null }
 $daemonIdentityMatches = $daemonProcess -and

@@ -89,7 +89,7 @@ try {
         "pageState === 'need_list'",
         "pageState === 'need_select'",
         'await acquireTaskLease\(signal\)',
-        'dev-newb-chrome-control-',
+        'sahar-tacit-chrome-control-',
         'candidate\.listen\(leasePipe\)',
         'serveLeaseControl',
         'timingSafeEqual',
@@ -137,7 +137,7 @@ try {
     }
 
     foreach ($requiredPattern in @(
-        'dev-newb-chrome-daemon-', 'timingSafeEqual', 'daemon_instance_id', 'expectedInstanceId',
+        'sahar-tacit-chrome-daemon-', 'timingSafeEqual', 'daemon_instance_id', 'expectedInstanceId',
         'expectedGeneration', 'maxTotalTimeout: timeoutFor\(name\)', 'CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS',
         '--no-usage-statistics', '--no-performance-crux', 'dispatched: true', 'stale_backend_generation',
         'probeLeaseStatus', '--lease-status', 'sanitizedDaemonFailure', 'daemon_absent',

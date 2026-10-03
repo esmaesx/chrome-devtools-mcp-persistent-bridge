@@ -151,3 +151,9 @@ Add `-RemoveInstalledFiles` only for the default install location. A custom inst
 ## Relationship and affiliation
 
 This independent project is not affiliated with, endorsed by, or supported by Google, OpenAI, Codex, or the Chrome DevTools MCP maintainers.
+
+## Sahar Tacit endpoint names
+
+This distribution uses `sahar-tacit-chrome-daemon-<rootHash>` and `sahar-tacit-chrome-control-<rootHash>` for its Windows named pipes. Install the daemon, stdio proxy, lease preflight, and diagnostic scripts from the same revision.
+
+Before updating an existing installation, finish active work and stop its daemon and clients using the old installation’s normal shutdown procedure. Restart them with the updated files. Old and new endpoint names do not interoperate; do not run both distributions against the same browser at once.
