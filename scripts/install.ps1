@@ -187,9 +187,9 @@ $payloadSwapComplete = $false
 $oldConfigExists = Test-Path -LiteralPath $configPath -PathType Leaf
 $oldAgentsExists = Test-Path -LiteralPath $agentsPath -PathType Leaf
 $oldStateExists = Test-Path -LiteralPath $statePath -PathType Leaf
-$oldConfig = if ($oldConfigExists) { Get-Content -LiteralPath $configPath -Raw } else { '' }
-$oldAgents = if ($oldAgentsExists) { Get-Content -LiteralPath $agentsPath -Raw } else { '' }
-$oldStateRaw = if ($oldStateExists) { Get-Content -LiteralPath $statePath -Raw } else { '' }
+$oldConfig = if ($oldConfigExists) { Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 } else { '' }
+$oldAgents = if ($oldAgentsExists) { Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8 } else { '' }
+$oldStateRaw = if ($oldStateExists) { Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 } else { '' }
 $oldState = if ($oldStateRaw) { $oldStateRaw | ConvertFrom-Json } else { $null }
 $previousOriginalSections = if ($oldState) { [string]$oldState.original_mcp_sections } else { '' }
 $installAgentGuidanceEffective = [bool]$InstallAgentGuidance -or ($oldState -and [bool]$oldState.installed_agent_guidance)
@@ -326,7 +326,7 @@ $($script:ConfigEnd)
 "@
         $newConfig = Add-OwnedBlock -Text $configWithoutOwned -Block $configBlock.TrimEnd()
         $currentConfigExists = Test-Path -LiteralPath $configPath -PathType Leaf
-        $currentConfig = if ($currentConfigExists) { Get-Content -LiteralPath $configPath -Raw } else { '' }
+        $currentConfig = if ($currentConfigExists) { Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 } else { '' }
         if ($currentConfigExists -ne $oldConfigExists -or $currentConfig -cne $oldConfig) { throw 'Codex config changed during installation. No managed config was written.' }
         $configWritten = $true
         Write-Utf8NoBom -Path $configPath -Text $newConfig -Committed ([ref]$configWriteCommitted)
@@ -346,7 +346,7 @@ $($script:AgentsEnd)
 "@
             $newAgents = Add-OwnedBlock -Text $agentsWithoutOwned -Block $agentsBlock.TrimEnd()
             $currentAgentsExists = Test-Path -LiteralPath $agentsPath -PathType Leaf
-            $currentAgents = if ($currentAgentsExists) { Get-Content -LiteralPath $agentsPath -Raw } else { '' }
+            $currentAgents = if ($currentAgentsExists) { Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8 } else { '' }
             if ($currentAgentsExists -ne $oldAgentsExists -or $currentAgents -cne $oldAgents) { throw 'AGENTS.md changed during installation. No agent guidance was written.' }
             Write-Output 'Installing the previewed managed AGENTS.md guidance because it was selected now or is owned by the prior installation.'
             Write-Output $agentsBlock
@@ -501,7 +501,7 @@ $($script:AgentsEnd)
         & $invokeRollbackStep 'Restore Codex config' {
             $configBackup = Join-Path $backupRoot 'config.toml'
             $currentConfigExists = Test-Path -LiteralPath $configPath -PathType Leaf
-            $currentConfig = if ($currentConfigExists) { Get-Content -LiteralPath $configPath -Raw } else { '' }
+            $currentConfig = if ($currentConfigExists) { Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 } else { '' }
             $changedAfterOurPoint = if ($configWriteCommitted) {
                 (-not $currentConfigExists) -or $currentConfig -cne $newConfig
             } else {
@@ -512,7 +512,7 @@ $($script:AgentsEnd)
                 $configRollback.Safe = $true
             } elseif ($oldConfigExists -and (Test-Path -LiteralPath $configBackup -PathType Leaf)) {
                 Write-Utf8NoBom -Path $configPath -Text $oldConfig
-                if (-not (Test-Path -LiteralPath $configPath -PathType Leaf) -or (Get-Content -LiteralPath $configPath -Raw) -cne $oldConfig) { throw 'The old Codex config was not verified after rollback.' }
+                if (-not (Test-Path -LiteralPath $configPath -PathType Leaf) -or (Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -cne $oldConfig) { throw 'The old Codex config was not verified after rollback.' }
                 $configRollback.Safe = $true
             } elseif (-not $oldConfigExists -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
                 Assert-NoReparsePointOnPathOrAncestor -Path $configPath -Label 'Codex config rollback target'
@@ -530,7 +530,7 @@ $($script:AgentsEnd)
         & $invokeRollbackStep 'Restore AGENTS.md' {
             $agentsBackup = Join-Path $backupRoot 'AGENTS.md'
             $currentAgentsExists = Test-Path -LiteralPath $agentsPath -PathType Leaf
-            $currentAgents = if ($currentAgentsExists) { Get-Content -LiteralPath $agentsPath -Raw } else { '' }
+            $currentAgents = if ($currentAgentsExists) { Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8 } else { '' }
             $changedAfterOurPoint = if ($agentsWriteCommitted) {
                 (-not $currentAgentsExists) -or $currentAgents -cne $newAgents
             } else {
@@ -541,7 +541,7 @@ $($script:AgentsEnd)
                 $agentsRollback.Safe = $true
             } elseif ($oldAgentsExists -and (Test-Path -LiteralPath $agentsBackup -PathType Leaf)) {
                 Write-Utf8NoBom -Path $agentsPath -Text $oldAgents
-                if (-not (Test-Path -LiteralPath $agentsPath -PathType Leaf) -or (Get-Content -LiteralPath $agentsPath -Raw) -cne $oldAgents) { throw 'The old AGENTS.md was not verified after rollback.' }
+                if (-not (Test-Path -LiteralPath $agentsPath -PathType Leaf) -or (Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8) -cne $oldAgents) { throw 'The old AGENTS.md was not verified after rollback.' }
                 $agentsRollback.Safe = $true
             } elseif (-not $oldAgentsExists -and (Test-Path -LiteralPath $agentsPath -PathType Leaf)) {
                 Assert-NoReparsePointOnPathOrAncestor -Path $agentsPath -Label 'AGENTS.md rollback target'
@@ -560,7 +560,7 @@ $($script:AgentsEnd)
             $stateBackup = Join-Path $backupRoot 'install-state.json'
             if ($oldStateExists -and (Test-Path -LiteralPath $stateBackup -PathType Leaf)) {
                 Write-Utf8NoBom -Path $statePath -Text $oldStateRaw
-                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or (Get-Content -LiteralPath $statePath -Raw) -cne $oldStateRaw) { throw 'The old install state was not verified after rollback.' }
+                if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or (Get-Content -LiteralPath $statePath -Raw -Encoding UTF8) -cne $oldStateRaw) { throw 'The old install state was not verified after rollback.' }
                 $stateRollback.Complete = $true
             } elseif (-not $oldStateExists -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
                 Assert-NoReparsePointOnPathOrAncestor -Path $statePath -Label 'Install state rollback target'

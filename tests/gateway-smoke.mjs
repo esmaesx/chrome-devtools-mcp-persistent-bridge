@@ -444,6 +444,38 @@ async function normalFlowAndInvalidList() {
   }
 }
 
+async function connectionCheckReportsSafeDiagnostics() {
+  for (const blocked of [false, true]) {
+    const events = join(tmpdir(), `chrome-bridge-check-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`);
+    const fixture = await createFixture('connection-check', {
+      FAKE_CHROME_EVENTS_FILE: events,
+      ...(blocked ? { FAKE_CHROME_LIST_CONNECTION_ERROR: '1' } : {}),
+    });
+    try {
+      await mkdir(join(fixture.root, 'scripts'));
+      const checker = join(fixture.root, 'scripts', 'check-connection.mjs');
+      await cp(join(repositoryRoot, 'scripts', 'check-connection.mjs'), checker);
+      let result;
+      try {
+        const output = await execFileAsync(process.execPath, [checker], { cwd: fixture.root, env: fixture.env, windowsHide: true, timeout: 25_000, encoding: 'utf8' });
+        result = { ...output, code: 0 };
+      } catch (cause) {
+        if (!Number.isInteger(cause.code)) throw cause;
+        result = cause;
+      }
+      expect(result.code === (blocked ? 3 : 0), `Connection check returned the wrong exit code: ${result.code}`);
+      expect(result.stdout.startsWith(blocked ? 'ACTION REQUIRED:' : 'READY:'), 'Connection check did not report the expected state.');
+      expect(result.stderr.trim() === '', 'Connection check exposed backend diagnostics.');
+      expect(!result.stdout.includes('a'.repeat(64)) && !result.stdout.includes('sahar-tacit-chrome-'), 'Connection check exposed private transport state.');
+      const dispatched = await readJsonLines(events);
+      expect(dispatched.length === 1 && dispatched[0].name === 'list_pages', 'Connection check must perform one read and no automatic approval or retry.');
+    } finally {
+      await closeFixture(fixture);
+      await rm(events, { force: true });
+    }
+  }
+}
+
 async function taskLease() {
   const fixture = await createFixture('lease', { CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS: '750' });
   try {
@@ -614,7 +646,7 @@ async function defaultGatewayIsFailFastAndQueueTimeoutDispatchesNothing() {
     const defaultStarted = Date.now();
     const defaultBusy = await call(defaultClient, 'list_pages');
     const defaultElapsed = Date.now() - defaultStarted;
-    expectError(defaultBusy, 'lease_busy', 'The default gateway did not return authenticated lease_busy.');
+    expectError(defaultBusy, 'lease_busy', `The default gateway did not return authenticated lease_busy: ${textOf(defaultBusy)}`);
     expect(defaultElapsed >= 600 && defaultElapsed <= 1_250, `The default 750 ms lease wait took ${defaultElapsed} ms.`);
     expect(defaultBusy.structuredContent?.lease_state === 'held', 'The default gateway did not authenticate the owner.');
     expect(defaultBusy.structuredContent?.owner_pid === fixtureTransportPid(fixture, owner), 'The default busy result did not identify the owner.');
@@ -892,6 +924,9 @@ async function cooperativeWaitersKeepMcpControlResponsive() {
 
     const settled = [false, false];
     flows = waiters.map((client, index) => completeSequence(client, `waiter-${index + 1}`).finally(() => { settled[index] = true; }));
+    // Observe early rejection while the control responsiveness checks run.
+    // The awaited flows below still fail the test and execute fixture cleanup.
+    for (const flow of flows) void flow.catch(() => {});
     await delay(150);
     const interimLease = (await parsedDaemonStatus(fixture.root)).lease;
     if (interimLease?.pid === fixtureTransportPid(fixture, owner)) {
@@ -1565,7 +1600,14 @@ if (process.env.CHROME_DEVTOOLS_MCP_TEST_FOCUS === 'default-wait') {
   process.exit(0);
 }
 
+if (process.env.CHROME_DEVTOOLS_MCP_TEST_FOCUS === 'connection-check') {
+  await connectionCheckReportsSafeDiagnostics();
+  process.stdout.write('Focused connection-check tests passed.\n');
+  process.exit(0);
+}
+
 await normalFlowAndInvalidList();
+await connectionCheckReportsSafeDiagnostics();
 await transientStatusPipeFailureIsRetried();
 await statusScriptStateFailures();
 await absentDaemonHasSanitizedCause();

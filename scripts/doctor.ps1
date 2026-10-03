@@ -39,7 +39,7 @@ if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     $checks | Format-Table -AutoSize
     exit 1
 }
-$state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+$state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($state.config_begin -and $state.config_end) {
     $script:ConfigBegin = [string]$state.config_begin
     $script:ConfigEnd = [string]$state.config_end
@@ -58,8 +58,8 @@ if (Test-Path -LiteralPath $chromePath -PathType Leaf) {
     Add-Check 'chrome-signature' ($signature.Status -eq 'Valid' -and [string]$signature.SignerCertificate.Subject -match '(?:CN|O)=Google LLC') ([string]$signature.Status)
 }
 
-$configText = if (Test-Path -LiteralPath $configPath -PathType Leaf) { Get-Content -LiteralPath $configPath -Raw } else { '' }
-$agentsText = if (Test-Path -LiteralPath $agentsPath -PathType Leaf) { Get-Content -LiteralPath $agentsPath -Raw } else { '' }
+$configText = if (Test-Path -LiteralPath $configPath -PathType Leaf) { Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 } else { '' }
+$agentsText = if (Test-Path -LiteralPath $agentsPath -PathType Leaf) { Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8 } else { '' }
 Add-Check 'codex-config-block' ($configText.Contains($script:ConfigBegin) -and $configText.Contains($script:ConfigEnd)) $configPath
 $expectsAgentGuidance = [bool]$state.installed_agent_guidance
 if ($expectsAgentGuidance) {
@@ -140,7 +140,7 @@ Add-Check 'no-process-tree-network-listeners' ($tcpListeners.Count -eq 0 -and $u
 
 $shrinkwrapPath = Join-Path $InstallRoot 'npm-shrinkwrap.json'
 if (Test-Path -LiteralPath $shrinkwrapPath -PathType Leaf) {
-    $shrinkwrapText = Get-Content -LiteralPath $shrinkwrapPath -Raw
+    $shrinkwrapText = Get-Content -LiteralPath $shrinkwrapPath -Raw -Encoding UTF8
     $versionPinsMatch = $shrinkwrapText -match '"chrome-devtools-mcp"\s*:\s*"1\.7\.0"' -and
         $shrinkwrapText -match '"@modelcontextprotocol/sdk"\s*:\s*"1\.29\.0"' -and
         $shrinkwrapText -match '"zod"\s*:\s*"4\.4\.3"'

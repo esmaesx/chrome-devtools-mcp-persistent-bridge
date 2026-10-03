@@ -73,7 +73,7 @@ try {
     }
 
     try {
-        $state = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     } catch {
         Write-SetupFailure -Status 'invalid' -Cause 'install_state_invalid'
     }

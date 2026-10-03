@@ -7,6 +7,7 @@ Complete every check on Windows before release.
 - [ ] `npm-shrinkwrap.json` is present and matches `package.json`.
 - [ ] `npm ci --ignore-scripts` completes.
 - [ ] `npm test` completes.
+- [ ] `npm run test:installer:windows` completes with a real temporary Scheduled Task and no skipped Windows cases.
 - [ ] `npm audit` completes with an accepted result.
 - [ ] CI uses Windows, Node 24, `npm ci`, `npm test`, and `npm audit`.
 

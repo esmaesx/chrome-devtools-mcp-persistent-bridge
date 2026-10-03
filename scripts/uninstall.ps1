@@ -49,7 +49,7 @@ $statePath = Join-Path $InstallRoot 'install-state.json'
 if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     throw "Install state is missing: $statePath. No changes were made."
 }
-$state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+$state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($state.config_begin -and $state.config_end) {
     $script:ConfigBegin = [string]$state.config_begin
     $script:ConfigEnd = [string]$state.config_end
@@ -73,7 +73,7 @@ if ($RemoveInstalledFiles) {
 
 $newConfig = $null
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {
-    $newConfig = Get-Content -LiteralPath $configPath -Raw
+    $newConfig = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
     $ownedConfigBlock = Get-OwnedBlockText -Text $newConfig -Begin $script:ConfigBegin -End $script:ConfigEnd
     if ((Get-TextSha256 -Text $ownedConfigBlock) -ne [string]$state.config_block_sha256) {
         throw 'The managed Codex config block was edited after installation. It was preserved for manual review.'
@@ -90,7 +90,7 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
 } else { throw "Codex config is missing: $configPath. No uninstall changes were made." }
 $newAgents = $null
 if ([bool]$state.installed_agent_guidance -and (Test-Path -LiteralPath $agentsPath -PathType Leaf)) {
-    $newAgents = Get-Content -LiteralPath $agentsPath -Raw
+    $newAgents = Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8
     $ownedAgentsBlock = Get-OwnedBlockText -Text $newAgents -Begin $script:AgentsBegin -End $script:AgentsEnd
     if ((Get-TextSha256 -Text $ownedAgentsBlock) -ne [string]$state.agents_block_sha256) {
         throw 'The managed AGENTS.md block was edited after installation. It was preserved for manual review.'

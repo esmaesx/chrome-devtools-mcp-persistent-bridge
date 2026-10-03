@@ -34,6 +34,7 @@
     "test:macos": "node tests/proxy-args.mjs && node --test tests/macos-smoke.mjs",
     "setup:macos": "node scripts/setup-macos.mjs",
     "test:installer": "node --test tests/macos-installer.test.mjs",
+    "test:installer:windows": "node --test tests/windows-installer.test.mjs",
     "test:launchagent": "node tests/macos-launchagent.mjs"
   },
   "dependencies": {

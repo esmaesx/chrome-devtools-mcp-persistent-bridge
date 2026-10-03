@@ -57,6 +57,8 @@ function Invoke-ReadOnlyLeaseProbe {
     $processInfo.CreateNoWindow = $true
     $processInfo.RedirectStandardOutput = $true
     $processInfo.RedirectStandardError = $true
+    $processInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $processInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     $processInfo.EnvironmentVariables['DEV_NEWB_BRIDGE_PREFLIGHT_ROOT'] = [System.IO.Path]::GetFullPath($InstallRoot)
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $processInfo
@@ -148,7 +150,7 @@ function Resolve-OfficialChromePath {
 
 function Remove-OwnedBlock {
     param(
-        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
         [Parameter(Mandatory)][string]$Begin,
         [Parameter(Mandatory)][string]$End
     )
@@ -181,7 +183,7 @@ function Get-TextSha256 {
 }
 
 function Remove-TomlMcpServerSection {
-    param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][string]$ServerName)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$ServerName)
     $lines = [regex]::Split($Text, '(?<=\n)')
     $kept = [System.Collections.Generic.List[string]]::new()
     $captured = [System.Collections.Generic.List[string]]::new()
@@ -210,7 +212,7 @@ function Remove-TomlMcpServerSection {
 }
 
 function Add-OwnedBlock {
-    param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][string]$Block)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Block)
     $base = $Text.TrimEnd("`r", "`n")
     if ($base.Length -eq 0) { return "$Block`r`n" }
     return "$base`r`n`r`n$Block`r`n"
@@ -310,6 +312,8 @@ function Invoke-NodeDaemonControl {
     $processInfo.CreateNoWindow = $true
     $processInfo.RedirectStandardOutput = $true
     $processInfo.RedirectStandardError = $true
+    $processInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $processInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $processInfo
     try {

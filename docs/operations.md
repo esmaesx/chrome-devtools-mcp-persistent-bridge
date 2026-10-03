@@ -43,6 +43,8 @@ The owner yields only when it has no active or queued tool, shutdown has not sta
 
 Initialization and `tools/list` do not acquire the lease. They can complete while another tool call waits. After a waiter acquires the lease, it must call `list_pages`, then `select_page`, then its target tool. An old owner that was yielded receives `blocked_discovery_required` on its next target call and must reacquire with fresh discovery and selection. Close the MCP gateway when the CLI session is complete. An explicit waiter can request an idle handoff after the race cushion, but it has no FIFO order or uninterrupted-session reservation.
 
+If another waiter acquires the released lease first, the waiting client verifies the new owner and continues within its original wait limit. It does not use the old owner's acknowledgement to change the new lease. Cancellation applies again after the new owner is verified.
+
 ## Audit and diagnosis
 
 Recovery attempts append JSON Lines records to `logs/recovery-audit.jsonl`. The log records timestamp, status, mutation state, process/window identifiers, and a short result detail. It is locally rotated. Treat it as operational metadata: restrict file access because process identifiers can still be useful to a local attacker.
@@ -73,6 +75,12 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/uninstal
 ```
 
 The uninstaller must retain Chrome, Chrome profiles, other MCP servers, and unrelated user configuration. It refuses an install root, ancestor, or descendant reparse point before it recursively enumerates or removes files. It does not revoke Chrome remote-debugging permission that Chrome has already granted. If it reports an ownership mismatch, stop and review the recorded state instead of deleting files by hand.
+
+## Windows installer regression test
+
+Run `npm run test:installer:windows` on Windows with Node 24 and official Google Chrome installed. The test uses Windows PowerShell 5.1, temporary folders, and one uniquely named Scheduled Task with a limited run level. It does not change the user's Codex configuration or call Chrome tools.
+
+The test checks UTF-8 text and paths, an empty configuration, private state permissions, authenticated daemon status, update refusal for active or unknown lease owners, rollback of all payload files, repeat installation, and uninstall cleanup. The test removes its task and temporary files after successful cleanup. It preserves files for inspection if managed cleanup fails.
 
 ## Incident response
 

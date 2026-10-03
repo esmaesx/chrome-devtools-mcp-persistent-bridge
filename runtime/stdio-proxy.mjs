@@ -560,7 +560,8 @@ async function closeLeaseCandidate(candidate) {
 async function acquireTaskLease(signal) {
   throwIfAcquireStopped(signal);
   if (leaseServer) return { acquiredNew: false, leaseInstanceId, ownerServer: leaseServer };
-  let acquisitionDeadline = performance.now() + leaseWaitMs;
+  const requestedDeadline = performance.now() + leaseWaitMs;
+  let acquisitionDeadline = requestedDeadline;
   let observedOwner;
   let trustedYieldTransitionUntil = 0;
   let committedYield = false;
@@ -592,6 +593,20 @@ async function acquireTaskLease(signal) {
       if (committedYield) {
         const committedRemaining = acquisitionDeadline - performance.now();
         if (committedRemaining <= 0) break;
+        // Another waiter can bind first after the acknowledged owner releases.
+        // Authenticate that successor, then continue within the original wait
+        // budget. The old handoff no longer gives us a claim to this lease.
+        const successor = await readLeaseOwner(Math.min(100, committedRemaining));
+        if (successor.state === 'held'
+          && (successor.gateway_instance_id !== observedOwner?.gateway_instance_id
+            || successor.lease_instance_id !== observedOwner?.lease_instance_id)) {
+          committedYield = false;
+          acquisitionDeadline = requestedDeadline;
+          trustedYieldTransitionUntil = 0;
+          observedOwner = successor;
+          throwIfAcquireStopped(signal);
+          continue;
+        }
         await acquisitionDelay(Math.min(25, committedRemaining), signal, true);
         continue;
       }
