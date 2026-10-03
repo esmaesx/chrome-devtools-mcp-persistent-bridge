@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { once } from 'node:events';
+const exec = promisify(execFile);
 import { randomBytes } from 'node:crypto';
 import { cp, mkdtemp, mkdir, realpath, writeFile, symlink, rm, chmod, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -35,7 +38,8 @@ test('macOS authenticated sockets, private state, MCP calls, and manual permissi
   const endpoints = await prepareEndpoints(root);
   let stderr = '';
   try {
-    await mkdir(join(root, 'runtime'));
+    await mkdir(join(root, 'runtime')); await mkdir(join(root, 'scripts'));
+    for (const name of ['check-connection.mjs', 'manage-macos.mjs']) await cp(join(source, 'scripts', name), join(root, 'scripts', name));
     for (const name of ['daemon.mjs', 'stdio-proxy.mjs', 'local-endpoints.mjs']) await cp(join(source, 'runtime', name), join(root, 'runtime', name));
     await symlink(join(source, 'node_modules'), join(root, 'node_modules'), 'dir');
     const statePath = join(root, 'install-state.json');
@@ -75,6 +79,16 @@ test('macOS authenticated sockets, private state, MCP calls, and manual permissi
     assert.notEqual(reacquired.isError, true, JSON.stringify(reacquired));
     await waiter.close(); waiter = null;
     await client.close(); client = null;
+    const checkArgs = [join(root, 'scripts/manage-macos.mjs'), 'check', '--root', root];
+    const ready = await exec(process.execPath, checkArgs, {env});
+    assert.match(ready.stdout, /^READY:/);
+    const unknownOwner = net.createServer(socket => socket.once('data', () => socket.end('{"invalid":true}\n')));
+    unknownOwner.listen(endpoints.lease); await once(unknownOwner, 'listening');
+    try {
+      await assert.rejects(exec(process.execPath, checkArgs, {env}), error => {
+        assert.equal(error.code, 3); assert.match(error.stdout, /^ACTION REQUIRED:/); return true;
+      });
+    } finally { await new Promise(resolveClose => unknownOwner.close(resolveClose)); }
     await request(endpoints.daemon, { operation: 'stop', token });
     for (let i = 0; i < 100 && daemon.exitCode === null; i++) await delay(50);
     assert.notEqual(daemon.exitCode, null, 'Owned test daemon failed to stop');
