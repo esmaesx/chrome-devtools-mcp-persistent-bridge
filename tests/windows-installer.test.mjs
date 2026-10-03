@@ -146,6 +146,8 @@ foreach($rule in $rules){$value=$rule.IdentityReference.Translate([Security.Prin
     const failed = await ps(install, args, { NODE_ENV: 'test', DEV_NEWB_BRIDGE_TEST_FAIL_AFTER_PAYLOAD_SWAP: '1' });
     assert.notEqual(failed.code, 0);
     assert.match(failed.stderr, /Test-only failure injection after payload swap/);
+    assert.doesNotMatch(failed.stdout, /Rollback was incomplete/);
+    await status(); // Check immediately, before payload hashing can hide a startup race.
     assert.equal(await readFile(config, 'utf8'), firstConfig);
     assert.equal(await readFile(statePath, 'utf8'), beforeState);
     assert.deepEqual(await hashes(root), beforeHashes);

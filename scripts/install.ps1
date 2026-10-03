@@ -588,7 +588,16 @@ $($script:AgentsEnd)
     }
     $rollbackSafeForTaskRestart = $payloadRollback.Complete -and $stateRollback.Complete -and $configRollback.Safe -and $agentsRollback.Safe
     if ($existingTaskWasRunning -and $oldTaskRollback.Restored -and $rollbackSafeForTaskRestart) {
-        & $invokeRollbackStep 'Restart old scheduled task' { Start-ScheduledTask -TaskName $TaskName }
+        & $invokeRollbackStep 'Restart old scheduled task' {
+            Start-ScheduledTask -TaskName $TaskName
+            $restoredDaemonReady = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+                Start-Sleep -Milliseconds 500
+                $restoredProbe = Invoke-NodeDaemonControl -NodePath ([string]$oldState.node_path) -DaemonPath (Join-Path $InstallRoot 'runtime\daemon.mjs') -Mode status
+                if ($restoredProbe.ExitCode -eq 0) { $restoredDaemonReady = $true; break }
+            }
+            if (-not $restoredDaemonReady) { throw 'The restored daemon did not become ready after rollback.' }
+        }
     } elseif ($existingTaskWasRunning -and $oldTaskRollback.Restored -and -not $rollbackSafeForTaskRestart) {
         $rollbackFailures.Add('Restart old scheduled task: blocked because payload, state, config, or AGENTS rollback was not safe; the task was left stopped')
     }
