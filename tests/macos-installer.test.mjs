@@ -85,3 +85,26 @@ test('concurrent config edit during uninstall is preserved and service restored'
   assert.match(await readFile(f.options.config,'utf8'), /concurrent edit/);
   await access(f.options.plist);
 });
+
+test('isolated label is recorded and mismatch refuses mutation', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await fixture(t);
+  f.options.label = 'com.sahar-tacit.test-isolated';
+  await writeFile(f.options.config, '');
+  await manage('install', f.options, f.adapters);
+  const state = JSON.parse(await readFile(join(f.options.root, 'install-state.json')));
+  assert.equal(state.service_label, f.options.label);
+  assert.match(await readFile(f.options.plist, 'utf8'), /com.sahar-tacit.test-isolated/);
+  const count = f.calls.length;
+  await assert.rejects(manage('uninstall', {...f.options, label: 'com.sahar-tacit.wrong'}, f.adapters), /original LaunchAgent label/);
+  assert.equal(f.calls.length, count);
+  await manage('uninstall', f.options, f.adapters);
+  assert.equal(await readFile(f.options.config, 'utf8'), '');
+});
+test('rollback waits for authenticated readiness after delayed startup', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await fixture(t); await manage('install', f.options, f.adapters);
+  let probes = 0;
+  f.adapters.control = async () => (++probes < 3 ? {ok:false} : {ok:true,status:'running'});
+  f.fail();
+  await assert.rejects(manage('install', f.options, f.adapters), /injected launch failure/);
+  assert.equal(probes, 3);
+});

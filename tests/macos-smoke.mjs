@@ -30,7 +30,7 @@ function request(path, body) {
 }
 test('macOS authenticated sockets, private state, MCP calls, and manual permission recovery', { skip: process.platform !== 'darwin' }, async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'sahar-tacit-mac-test-')));
-  let daemon, transport, client;
+  let daemon, transport, client, waiter, waiterTransport;
   const token = randomBytes(32).toString('hex');
   const endpoints = await prepareEndpoints(root);
   let stderr = '';
@@ -46,7 +46,7 @@ test('macOS authenticated sockets, private state, MCP calls, and manual permissi
     await chmod(statePath, 0o600);
     assert.equal((await lstat(endpoints.directory)).mode & 0o777, 0o700);
     assert.ok(localEndpoints(root, 'win32').daemon.startsWith('\\\\.\\pipe\\sahar-tacit-chrome-daemon-'));
-    const env = { ...process.env, NODE_ENV: 'test', CHROME_DEVTOOLS_MCP_ALLOW_TEST_BACKEND: '1', CHROME_DEVTOOLS_MCP_TEST_BACKEND: join(source, 'tests/fake-chrome-server.mjs') };
+    const env = { ...process.env, NODE_ENV: 'test', CHROME_DEVTOOLS_MCP_ALLOW_TEST_BACKEND: '1', CHROME_DEVTOOLS_MCP_TEST_LEASE_IDLE_MS: '10000', CHROME_DEVTOOLS_MCP_TEST_YIELD_GRACE_MS: '80', CHROME_DEVTOOLS_MCP_TEST_BACKEND: join(source, 'tests/fake-chrome-server.mjs') };
     daemon = spawn(process.execPath, [join(root, 'runtime/daemon.mjs')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     daemon.stderr.on('data', chunk => { stderr += chunk; });
     let status;
@@ -58,18 +58,29 @@ test('macOS authenticated sockets, private state, MCP calls, and manual permissi
     const denied = await request(endpoints.daemon, { operation: 'status', token: 'wrong' });
     assert.notEqual(denied.ok, true);
     client = new Client({ name: 'mac-test', version: '1' });
-    transport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'runtime/stdio-proxy.mjs'), 'chrome-devtools'], cwd: root, env, stderr: 'pipe' });
+    transport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'runtime/stdio-proxy.mjs'), 'chrome-devtools', '--lease-wait-ms', '5000'], cwd: root, env, stderr: 'pipe' });
     await client.connect(transport);
     assert.equal((await client.listTools()).tools.length, 30);
     assert.notEqual((await client.callTool({ name: 'list_pages', arguments: {} })).isError, true);
     const recovery = await client.callTool({ name: 'allow_remote_debugging', arguments: {} });
     assert.equal(recovery.structuredContent.status, 'manual_permission_required');
     assert.equal(recovery.structuredContent.mutated, false);
+    waiter = new Client({ name: 'mac-handoff-test', version: '1' });
+    waiterTransport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'runtime/stdio-proxy.mjs'), 'chrome-devtools', '--lease-wait-ms', '5000'], cwd: root, env, stderr: 'pipe' });
+    await waiter.connect(waiterTransport);
+    await delay(100);
+    assert.notEqual((await waiter.callTool({ name: 'list_pages', arguments: {} })).isError, true, 'Idle owner did not cooperatively yield');
+    await delay(100);
+    const reacquired = await client.callTool({ name: 'list_pages', arguments: {} });
+    assert.notEqual(reacquired.isError, true, JSON.stringify(reacquired));
+    await waiter.close(); waiter = null;
     await client.close(); client = null;
     await request(endpoints.daemon, { operation: 'stop', token });
     for (let i = 0; i < 100 && daemon.exitCode === null; i++) await delay(50);
     assert.notEqual(daemon.exitCode, null, 'Owned test daemon failed to stop');
   } finally {
+    await waiter?.close().catch(() => {});
+    await waiterTransport?.close().catch(() => {});
     await client?.close().catch(() => {});
     await transport?.close().catch(() => {});
     if (daemon && daemon.exitCode === null) {

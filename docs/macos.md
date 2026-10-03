@@ -64,3 +64,16 @@ npm run test:macos
 ```
 
 The smoke test uses an isolated installation and fake Chrome backend. It checks authentication, state permissions, MCP calls, and manual-only permission recovery. A signed-in production Chrome session and a live Teal upload were not used for this validation.
+
+## Isolated installer validation
+
+For a separate test installation, pass all of `--root`, `--config`, `--plist`, and `--label` to the manager. Use absolute paths and a unique LaunchAgent label. The label is recorded in installation state; later operations must use the same label and paths. The Bulk Files macOS wrapper exposes corresponding isolation options.
+
+Install and rollback wait for authenticated daemon readiness. The test-only rollback injection requires both `NODE_ENV=test` and `SAHAR_TACIT_TEST_FAIL_AFTER_PAYLOAD_SWAP=1`. It is intended for disposable installations.
+
+```sh
+npm run test:installer
+npm run test:launchagent
+```
+
+The first command checks configuration ownership, rollback, empty configuration, and label isolation with adapters. The second creates and removes a uniquely named real LaunchAgent. The macOS smoke test also checks cooperative lease handoff between two clients. Full wrapper results and remaining native-browser gaps are recorded in the Bulk Files `MACOS_VALIDATION_REPORT.md`.

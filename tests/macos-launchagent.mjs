@@ -25,12 +25,16 @@ try {
   await writeFile(plist,text,{mode:0o600});
   await exec('/usr/bin/plutil',['-lint',plist]);
   await exec('/bin/launchctl',['bootstrap',domain,plist]);loaded=true;
-  let status;
-  for(let i=0;i<40;i++) {
-    try {status=JSON.parse((await exec(process.execPath,[join(root,'runtime/daemon.mjs'),'--status'])).stdout);if(status.ok)break;}catch{}
+  let status, lastError;
+  for(let i=0;i<120;i++) {
+    try {status=JSON.parse((await exec(process.execPath,[join(root,'runtime/daemon.mjs'),'--status'])).stdout);if(status.ok)break;}catch(error){lastError=String(error.stderr || error.message);}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
-  if (!status?.ok) console.error(await readFile(join(root,'logs/daemon-error.log'),'utf8').catch(()=> 'No daemon log'));
+  if (!status?.ok) {
+    console.error('Status probe:',lastError);
+    console.error(await readFile(join(root,'logs/daemon-error.log'),'utf8').catch(()=> 'No daemon log'));
+    console.error((await exec('/bin/launchctl',['print',domain+'/'+label])).stdout);
+  }
   assert.equal(status?.ok,true,'LaunchAgent failed to start the daemon');
   await exec('/bin/launchctl',['bootout',domain,plist]);loaded=false;
   console.log('PASS: actual macOS LaunchAgent started the authenticated test daemon and stopped cleanly.');

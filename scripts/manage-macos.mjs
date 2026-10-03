@@ -33,8 +33,8 @@ export function splitOwned(text, expectedHash) {
   if (!expectedHash || hash(block) !== expectedHash) throw new Error('The managed Codex block was edited or is not owned by this installation.');
   return { before: text.slice(0, start), block, after: text.slice(end) };
 }
-export function launchPlist(node, root) {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${LABEL}</string>\n<key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(join(root, 'runtime/daemon.mjs'))}</string></array>\n<key>WorkingDirectory</key><string>${xml(root)}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>StandardOutPath</key><string>${xml(join(root, 'logs/daemon.log'))}</string>\n<key>StandardErrorPath</key><string>${xml(join(root, 'logs/daemon-error.log'))}</string>\n</dict></plist>\n`;
+export function launchPlist(node, root, label = LABEL) {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(label)}</string>\n<key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(join(root, 'runtime/daemon.mjs'))}</string></array>\n<key>WorkingDirectory</key><string>${xml(root)}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>StandardOutPath</key><string>${xml(join(root, 'logs/daemon.log'))}</string>\n<key>StandardErrorPath</key><string>${xml(join(root, 'logs/daemon-error.log'))}</string>\n</dict></plist>\n`;
 }
 async function readOptional(path) { try { return await readFile(path, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } }
 async function safePath(path) {
@@ -70,15 +70,27 @@ async function assertIdle(root) {
   const status = await daemonControl(root, '--status');
   if (status.ok !== true && status.cause !== 'daemon_absent') throw new Error('The existing daemon state is uncertain. Run status before changing the installation.');
 }
-async function serviceLoaded(run) {
-  try { await run('print', [`gui/${process.getuid()}/${LABEL}`]); return true; }
+async function serviceLoaded(run, label) {
+  try { await run('print', [`gui/${process.getuid()}/${label}`]); return true; }
   catch (e) { if (String(e.stderr).includes('Could not find service')) return false; throw e; }
 }
+async function waitForReady(root, control) {
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const status = await control(root, '--status');
+    if (status.ok === true && status.status === 'running') return;
+    await pause(250);
+  }
+  throw new Error('The service did not become ready. Inspect the retained logs.');
+}
+
 export async function manage(action, options = {}, adapters = {}) {
   if (process.platform !== 'darwin') throw new Error('This setup command is for macOS.');
+  const label = options.label || LABEL;
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]{2,100}$/.test(label)) throw new Error('Invalid LaunchAgent label.');
   const root = resolve(options.root || join(homedir(), 'Library/Application Support/Sahar Tacit/Chrome Bridge'));
   const config = resolve(options.config || join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml'));
-  const plist = resolve(options.plist || join(homedir(), 'Library/LaunchAgents', LABEL + '.plist'));
+  const plist = resolve(options.plist || join(homedir(), 'Library/LaunchAgents', label + '.plist'));
   const statePath = join(root, 'install-state.json');
   const run = adapters.launchctl || ((command, args) => exec('/bin/launchctl', [command, ...args], { timeout: 15000 }));
   const control = adapters.control || daemonControl;
@@ -99,11 +111,12 @@ export async function manage(action, options = {}, adapters = {}) {
     const oldRaw = await readOptional(statePath), old = oldRaw ? JSON.parse(oldRaw) : null;
     if (old && (old.install_root !== root || old.manager !== LABEL)) throw new Error('This directory belongs to a different installation.');
     if (old && (old.config_path !== config || old.plist_path !== plist)) throw new Error('Use the original configuration and LaunchAgent paths for this installation.');
+    if (old && (old.service_label || LABEL) !== label) throw new Error('Use the original LaunchAgent label for this installation.');
     const oldConfig = await readOptional(config), oldPlist = await readOptional(plist);
     const owned = splitOwned(oldConfig || '', old?.config_block_sha256);
     if (oldPlist !== null && (!old || hash(oldPlist) !== old.plist_sha256)) throw new Error('The LaunchAgent is not owned by this installation or was edited.');
     if (old && !oldPlist) throw new Error('The managed LaunchAgent is missing. Restore it before updating or uninstalling.');
-    const loaded = await serviceLoaded(run);
+    const loaded = await serviceLoaded(run, label);
     if (loaded && !old) throw new Error('Another LaunchAgent already uses this service name.');
     await idle(root);
     const revision = options.revision || 'local';
@@ -125,7 +138,7 @@ export async function manage(action, options = {}, adapters = {}) {
       } catch (error) {
         if (configChanged && await readOptional(config) === newConfig) await writeAtomic(config, oldConfig);
         if (plistMoved) await rename(join(transaction, 'removed-agent.plist'), plist);
-        if (stopped) await run('bootstrap', [`gui/${process.getuid()}`, plist]);
+        if (stopped) { await run('bootstrap', [`gui/${process.getuid()}`, plist]); await waitForReady(root, control); }
         throw error;
       }
       return { ok: true, message: 'Bridge disabled; managed Codex connection and login service removed. Files and backups retained.', root };
@@ -147,20 +160,19 @@ export async function manage(action, options = {}, adapters = {}) {
         try { await rename(join(root, item), join(transaction, item)); replaced.push(item); } catch (e) { if (e.code !== 'ENOENT') throw e; }
         await rename(join(stage, item), join(root, item)); installed.push(item);
       }
+      if (process.env.NODE_ENV === 'test' && process.env.SAHAR_TACIT_TEST_FAIL_AFTER_PAYLOAD_SWAP === '1') throw new Error('Test-only failure after payload swap.');
       const block = configBlock(process.execPath, join(root, 'runtime/stdio-proxy.mjs'));
       newConfig = owned.before + (owned.before && !owned.before.endsWith('\n') ? '\n' : '') + block + owned.after;
-      newPlist = launchPlist(process.execPath, root);
+      newPlist = launchPlist(process.execPath, root, label);
       await mkdir(join(root, 'logs'), { recursive: true, mode: 0o700 });
       await compareWrite(config, oldConfig, newConfig);
       await compareWrite(plist, oldPlist, newPlist);
-      const state = { manager: LABEL, install_root: root, node_path: process.execPath, package_version: '0.1.3', revision,
+      const state = { manager: LABEL, service_label: label, install_root: root, node_path: process.execPath, package_version: '0.1.3', revision,
         config_path: config, config_block_sha256: hash(block), plist_path: plist, plist_sha256: hash(newPlist),
         daemon_token: old?.daemon_token || randomBytes(32).toString('hex') };
       await writeAtomic(statePath, JSON.stringify(state, null, 2) + '\n');
       await run('bootstrap', [`gui/${process.getuid()}`, plist]);
-      let status;
-      for (let i = 0; i < 40; i++) { status = await control(root, '--status'); if (status.ok) break; await pause(250); }
-      if (!status?.ok) throw new Error('The service did not become ready. Inspect the retained logs.');
+      await waitForReady(root, control);
       await rm(stage, { recursive: true, force: true });
       return { ok: true, root, message: 'Bridge installed and starts at login. Restart Codex to load sahar-tacit-chrome. Run check to verify Chrome access.', revision };
     } catch (error) {
@@ -172,7 +184,7 @@ export async function manage(action, options = {}, adapters = {}) {
       for (const item of installed.reverse()) await rename(join(root, item), join(transaction, 'failed-' + item));
       for (const item of replaced) await rename(join(transaction, item), join(root, item));
       if (oldRaw !== null) await writeAtomic(statePath, oldRaw); else await rm(statePath, { force: true });
-      if (serviceStopped && oldPlist) await run('bootstrap', [`gui/${process.getuid()}`, plist]);
+      if (serviceStopped && oldPlist) { await run('bootstrap', [`gui/${process.getuid()}`, plist]); await waitForReady(root, control); }
       throw error;
     }
   } finally { await lock.close(); await rm(lockPath); }
@@ -181,14 +193,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const [action = 'status', ...args] = process.argv.slice(2);
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--root','--source','--revision','--config','--plist'].includes(args[i]) || !args[i+1]) throw new Error('Invalid setup arguments.');
+    if (!['--root','--source','--revision','--config','--plist','--label'].includes(args[i]) || !args[i+1]) throw new Error('Invalid setup arguments.');
     options[args[i].slice(2)] = args[i+1];
   }
   try {
     if (action === 'check') {
       const root = resolve(options.root || join(homedir(), 'Library/Application Support/Sahar Tacit/Chrome Bridge'));
       const checker = join(root, 'scripts/check-connection.mjs');
-      const r = await exec(process.execPath, [checker], { timeout: 25000 }); process.stdout.write(r.stdout);
+      try {
+        const r = await exec(process.execPath, [checker], { timeout: 25000 }); process.stdout.write(r.stdout);
+      } catch (error) {
+        if (error.stdout) process.stdout.write(error.stdout);
+        if (error.stderr) process.stderr.write(error.stderr);
+        process.exitCode = Number.isInteger(error.code) ? error.code : 1;
+      }
     } else console.log(JSON.stringify(await manage(action, options), null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
