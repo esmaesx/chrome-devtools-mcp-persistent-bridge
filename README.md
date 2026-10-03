@@ -28,6 +28,12 @@ This package implements the goal in [ChromeDevTools/chrome-devtools-mcp issue #8
 | Startup | Normal interactive user, limited run level, fixed paths, one scheduled-task instance | The watchdog must not run elevated or resolve an attacker-controlled executable. |
 | Configuration | Owned blocks, backups, compare-before-write checks, and rollback on detected install failure | Whole-file replacement can destroy unrelated user configuration. |
 
+## Automated setup for Bulk Files users
+
+The [Bulk Files setup guide](https://github.com/sahar-tacit/teal-eval-bulk-files/blob/main/docs/easy-setup.md) provides one command for macOS or Windows, a private Node runtime, automatic startup, Codex configuration, and a connection check. Access to that private repository is required.
+
+The manual setup options below remain available for developers.
+
 ## macOS
 
 See [macOS setup and verification](docs/macos.md) for the Node-based setup, Unix socket transport, manual Chrome permission step, and Bulk Files commands. Windows installation and automatic dialog recovery below are Windows-specific.

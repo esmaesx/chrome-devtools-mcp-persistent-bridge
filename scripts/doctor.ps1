@@ -40,6 +40,10 @@ if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     exit 1
 }
 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+if ($state.config_begin -and $state.config_end) {
+    $script:ConfigBegin = [string]$state.config_begin
+    $script:ConfigEnd = [string]$state.config_end
+}
 $nodePath = [string]$state.node_path
 $chromePath = [string]$state.expected_chrome_path
 $configPath = [string]$state.config_path

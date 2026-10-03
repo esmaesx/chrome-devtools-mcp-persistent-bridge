@@ -2,7 +2,13 @@
 
 This distribution supports Windows named pipes and macOS Unix domain sockets. The macOS runtime was tested locally on Apple Silicon with Node 26.5.0 using the real daemon and proxy, a synthetic MCP backend, and a temporary Chromium profile for Bulk Files upload tests. The authenticated bridge smoke test also passed locally on Node 24. macOS CI is not yet enabled.
 
-## Install
+## Automated installation
+
+For normal Bulk Files use, follow the [automated setup guide](https://github.com/sahar-tacit/teal-eval-bulk-files/blob/main/docs/easy-setup.md). It installs a pinned build in a stable user directory, configures Codex, and creates a LaunchAgent for automatic startup. It also provides status, check, update, and uninstall commands.
+
+Developers with an existing checkout can use `scripts/manage-macos.mjs install --source <absolute-prepared-checkout>` after installing dependencies. It manages its own Codex block, preserves unrelated settings, and refuses to update during active bridge work. The source checkout must be separate from the installation directory.
+
+## Manual developer setup
 
 Use an owner-controlled checkout of this repository with Node 24 or 26:
 

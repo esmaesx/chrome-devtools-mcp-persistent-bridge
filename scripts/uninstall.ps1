@@ -50,6 +50,10 @@ if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     throw "Install state is missing: $statePath. No changes were made."
 }
 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+if ($state.config_begin -and $state.config_end) {
+    $script:ConfigBegin = [string]$state.config_begin
+    $script:ConfigEnd = [string]$state.config_end
+}
 if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$state.install_root), $InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Install state does not own the requested install root.'
 }
@@ -77,7 +81,7 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     $newConfig = Remove-OwnedBlock -Text $newConfig -Begin $script:ConfigBegin -End $script:ConfigEnd
     $restored = [string]$state.original_mcp_sections
     if (-not [string]::IsNullOrWhiteSpace($restored)) {
-        foreach ($serverName in @('chrome-devtools', 'chrome-debugging-recovery')) {
+        foreach ($serverName in @($(if ($state.mcp_server_name) { [string]$state.mcp_server_name } else { 'chrome-devtools' }), 'chrome-debugging-recovery')) {
             $check = Remove-TomlMcpServerSection -Text $newConfig -ServerName $serverName
             if ($check.Found) { throw "Codex config has a new '$serverName' definition. No uninstall changes were made." }
         }

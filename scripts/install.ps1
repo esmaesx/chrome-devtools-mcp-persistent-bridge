@@ -4,6 +4,7 @@ param(
     [string]$CodexHome,
     [string]$ChromePath,
     [string]$TaskName = 'DevNewb Chrome DevTools MCP Persistent Bridge',
+    [ValidatePattern('^[A-Za-z0-9-]+$')][string]$McpServerName = 'chrome-devtools',
     [switch]$ReplaceExistingChromeMcp,
     [switch]$InstallAgentGuidance,
     [switch]$SkipScheduledTask,
@@ -12,6 +13,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+if ($McpServerName -ne 'chrome-devtools') {
+    $script:ConfigBegin = "# BEGIN sahar-tacit $McpServerName"
+    $script:ConfigEnd = "# END sahar-tacit $McpServerName"
+}
 
 $script:PayloadItemNames = @('runtime', 'scripts', 'package.json', 'npm-shrinkwrap.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'node_modules')
 
@@ -259,7 +264,8 @@ try {
 
     $configWithoutOwned = Remove-OwnedBlock -Text $oldConfig -Begin $script:ConfigBegin -End $script:ConfigEnd
     $originalSections = $previousOriginalSections
-    foreach ($serverName in @('chrome-devtools', 'chrome-debugging-recovery')) {
+    $serversToCheck = if ($McpServerName -eq 'chrome-devtools') { @('chrome-devtools', 'chrome-debugging-recovery') } else { @($McpServerName) }
+    foreach ($serverName in $serversToCheck) {
         $removal = Remove-TomlMcpServerSection -Text $configWithoutOwned -ServerName $serverName
         if ($removal.Found) {
             if (-not $ReplaceExistingChromeMcp) {
@@ -301,19 +307,19 @@ try {
         $proxyPath = Join-Path $InstallRoot 'runtime\stdio-proxy.mjs'
         $configBlock = @"
 $($script:ConfigBegin)
-[mcp_servers.chrome-devtools]
+[mcp_servers.$McpServerName]
 command = '$nodePath'
 args = ['$proxyPath', 'chrome-devtools']
 startup_timeout_sec = 20.0
 tool_timeout_sec = 130.0
 
-[mcp_servers.chrome-devtools.tools.click]
+[mcp_servers.$McpServerName.tools.click]
 approval_mode = "approve"
 
-[mcp_servers.chrome-devtools.tools.evaluate_script]
+[mcp_servers.$McpServerName.tools.evaluate_script]
 approval_mode = "approve"
 
-[mcp_servers.chrome-devtools.tools.take_snapshot]
+[mcp_servers.$McpServerName.tools.take_snapshot]
 approval_mode = "approve"
 
 $($script:ConfigEnd)
@@ -361,6 +367,9 @@ $($script:AgentsEnd)
             node_path = $nodePath
             expected_chrome_path = $officialChromePath
             daemon_token = $daemonToken
+            config_begin = $script:ConfigBegin
+            config_end = $script:ConfigEnd
+            mcp_server_name = $McpServerName
             task_name = $TaskName
             original_mcp_sections = $originalSections
             latest_backup = $backupRoot
